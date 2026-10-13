@@ -93,6 +93,7 @@ pub(crate) enum Check {
     BasicAuth,
     Ntlm,
     Conn,
+    Literal,
     AwsSecret,
     Assignment,
 }
@@ -277,6 +278,8 @@ pub(crate) static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         gated("cli-password-flag"),
         Check::Strong,
     );
+    add("securestring-literal", &["convertto-securestring"], true, gated("securestring-literal"), Check::Literal);
+    add("curl-setopt", &["CURLOPT_"], false, gated("curl-setopt"), Check::Literal);
     add(
         "short-password-flag", &["mysql", "mariadb", "mongo", "docker"], false,
         gated("short-password-flag"),
@@ -446,7 +449,14 @@ impl Check {
                 let nt_len = msg.get(20..22).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
                 if nt_len > 0 { Ok(()) } else { Err(Reason::NotNtlmResponse) }
             }
-            Check::Conn => local(span.start).and_then(|_| secret_value(&percent_decode(body), Context::Quoted)),
+            Check::Conn => local(span.start).and_then(|_| match secret_value(&percent_decode(body), Context::Decoded) {
+                Err(Reason::NotRandom) if unpronounceable(body) => Ok(()),
+                r => r,
+            }),
+            Check::Literal => match secret_value(body, Context::Decoded) {
+                Err(Reason::NotRandom | Reason::Identifier | Reason::Wordy) => Ok(()),
+                r => r,
+            },
             Check::Assignment => {
                 let key = std::str::from_utf8(caps.name("key").unwrap().as_bytes()).unwrap_or("");
                 if key_excluded(key) {
@@ -460,10 +470,17 @@ impl Check {
     }
 }
 
+/// Lowercase letters with a run of five consonants (`pxidztpv`): random, not a word like `postgres`.
+fn unpronounceable(v: &str) -> bool {
+    v.len() >= 8
+        && v.bytes().all(|b| b.is_ascii_lowercase())
+        && v.split(|c| "aeiouy".contains(c)).any(|run| run.len() >= 5)
+}
+
 /// Credentials for a service on this machine (`http://127.0.0.1:7906/auth?token=…`) are not worth blocking.
 fn in_local_url(text: &str, start: usize) -> bool {
     static LOCAL: LazyLock<Regex> = LazyLock::new(|| {
-        ascii_regex(r"^[a-z][a-z0-9+.-]*://(?:[A-Za-z0-9._~%!$&*+,;:=-]*@)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/?#]|$)")
+        ascii_regex(r"^[a-z][a-z0-9+.-]*://(?:[A-Za-z0-9._~%!$&*+,;:=@-]*@)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/?#]|$)")
     });
     let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '<' | '>' | '=');
     let Some(scheme) = text[..start].rfind("://") else { return false };

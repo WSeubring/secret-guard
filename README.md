@@ -90,7 +90,8 @@ Measured on this machine:
    NKEY seeds, JWK private members, PEM and base64-wrapped PEM keys, ~60 total). Placeholder tails (`xxxx`, `your-…`,
    runs, sequences) are ignored.
 2. **Context rules**: `key = value` assignments, CLI flags, `Bearer`, `Basic`,
-   `ApiKey` and NTLM credentials, docker config `auth`, URL credentials, `curl -u`, `mysql -p`, `sshpass -p`, and prose
+   `ApiKey` and NTLM credentials, docker config `auth`, URL credentials, `curl -u`,
+   `CURLOPT_USERPWD`, `mysql -p`, `sshpass -p`, PowerShell `ConvertTo-SecureString '…'`, and prose
    ("my password is …", "het wachtwoord is …"). The value must look random and not
    be a reference (`$VAR`, `${{ secrets.X }}`, `op://…`), template, identifier,
    path, MR ref, hash, email, sealed/sops blob or placeholder.

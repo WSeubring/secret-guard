@@ -3,7 +3,7 @@
 pub const GATED: &[(&str, &str)] = &[
     (
         "url-credentials",
-        r#"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?|mssql|sqlserver|clickhouse|s?ftp|smtps?|ldaps?|https?|nats|kafka)://[^\s:/@'"]+:(?P<body>[^\s@/'"]+)@[^\s/'"]+"#,
+        r#"(?i)\b[a-z][a-z0-9+.-]*://[^\s:/'"]*:(?P<body>[^\s@/'"]+)@[^\s/'"]+"#,
     ),
     (
         "authorization-bearer",
@@ -19,7 +19,15 @@ pub const GATED: &[(&str, &str)] = &[
     ),
     (
         "cli-password-flag",
-        r#"(?i)(?:^|[\s;|&(])--?(?:[a-z0-9]+-)*(?:password|passwd|pass|token|secret|api-key|apikey|client-secret|access-key|secret-key|auth-token)(?:=|[ \t]+)(?P<q>["']?)(?P<body>[^\s"']{6,})"#,
+        r#"(?i)(?:^|[\s;|&(])--?(?:[a-z0-9]+-)*(?:[a-z0-9]*(?:password|passwd|token|secret)|pass|api-key|apikey|client-secret|access-key|secret-key|auth-token)(?:=|[ \t]+)(?P<q>["']?)(?P<body>[^\s"']{6,})"#,
+    ),
+    (
+        "securestring-literal",
+        r#"(?i)\bConvertTo-SecureString[ \t]+(?:-String[ \t]+)?\\?["'](?P<body>[^\s"'\\]+)\\?["']"#,
+    ),
+    (
+        "curl-setopt",
+        r#"\bCURLOPT_(?:PROXY)?(?:PASSWORD|USERPWD|KEYPASSWD|XOAUTH2_BEARER)[ \t]*,[ \t]*"(?:[^"\s:]*:)?(?P<body>[^"\s]+)""#,
     ),
     (
         "short-password-flag",

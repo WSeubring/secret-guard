@@ -91,6 +91,13 @@ fn smoke_positives_are_found() {
             ("authorization-basic", format!("-H 'es-authorization: ApiKey {}'", b64(format!("{}:{}", rng.pick(20, URLSAFE), rng.pick(22, URLSAFE)).as_bytes()))),
             ("docker-config-auth", format!("{{\"auths\": {{\"ghcr.io\": {{\"auth\": \"{}\"}}}}}}", b64(format!("ci:{pw}").as_bytes()))),
             ("ntlm-authenticate", format!("Authorization: NTLM {}", b64(&[b"NTLMSSP\0\x03\0\0\0\x18\0\x18\0\x40\0\0\0\x18\0".as_slice(), rng.pick(60, A62).as_bytes()].concat()))),
+            ("cli-password-flag", format!("Connect-Azure -CertFilePassword {pw}")),
+            ("url-credentials", format!("redis://:{pw}@cache.prod.internal:6379/0")),
+            ("url-credentials", format!("mqtt+ws://{}:{pw}@broker.prod.internal:1883", rng.pick(6, "abcdefgh"))),
+            ("url-credentials", format!("smtps://ops@corp.example:{pw}@smtp.corp.example:465")),
+            ("url-credentials", format!("ftp://svc:{}@files.prod.internal/", rng.pick(10, "bcdfghjklmnpqrstvwxz"))),
+            ("securestring-literal", format!("$p = ConvertTo-SecureString '{}' -AsPlainText -Force", rng.pick(9, "bcdfghjklmnpqrstvwxz"))),
+            ("curl-setopt", format!("curl_easy_setopt(h, CURLOPT_USERPWD, \"svc:{pw}\");")),
         ];
         for (rule, text) in cases {
             let found = scan_text(&text);

@@ -31,6 +31,18 @@ fn fill(template: &str, rng: &mut Rng) -> String {
     out.replace("{port}", "7906")
 }
 
+fn b64(data: &[u8]) -> String {
+    let a = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = c.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= c.len() { a[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
 fn events(text: &str) -> [serde_json::Value; 3] {
     [
         json!({"hook_event_name": "UserPromptSubmit", "prompt": text}),
@@ -74,6 +86,11 @@ fn smoke_positives_are_found() {
             ("prose-secret", format!("the password is {pw}")),
             ("generic-assignment", format!("DB_PASSWORD=\"{pw}\"")),
             ("cli-password-flag", format!("app login --password {pw}")),
+            ("authorization-bearer", format!("headers = [\"Bearer {}\"]", rng.pick(64, HEX))),
+            ("authorization-basic", format!("expect(header).toBe('Basic {}')", b64(format!("svc:{pw}").as_bytes()))),
+            ("authorization-basic", format!("-H 'es-authorization: ApiKey {}'", b64(format!("{}:{}", rng.pick(20, URLSAFE), rng.pick(22, URLSAFE)).as_bytes()))),
+            ("docker-config-auth", format!("{{\"auths\": {{\"ghcr.io\": {{\"auth\": \"{}\"}}}}}}", b64(format!("ci:{pw}").as_bytes()))),
+            ("ntlm-authenticate", format!("Authorization: NTLM {}", b64(&[b"NTLMSSP\0\x03\0\0\0\x18\0\x18\0\x40\0\0\0\x18\0".as_slice(), rng.pick(60, A62).as_bytes()].concat()))),
         ];
         for (rule, text) in cases {
             let found = scan_text(&text);

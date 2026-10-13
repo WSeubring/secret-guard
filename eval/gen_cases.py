@@ -11,7 +11,9 @@ import os
 import random
 import re
 import string
+import struct
 import sys
+from urllib.parse import quote
 
 R = random.Random(int(sys.argv[1]) if len(sys.argv) > 1 else 1337)
 A62 = string.ascii_letters + string.digits
@@ -391,6 +393,446 @@ CLEAN = [
 ]
 
 
+# --------------------------------------------------------------------------- context rules
+
+LOWER = string.ascii_lowercase
+LOWDIG = LOWER + string.digits
+
+
+def rbytes(n):
+    return bytes(R.randrange(256) for _ in range(n))
+
+
+def opaque(url=False):
+    shapes = [lambda: rnd(R.randint(32, 48), URLSAFE), lambda: sha(R.choice([40, 64]))]
+    return R.choice(shapes + ([] if url else [lambda: base64.b64encode(rbytes(32)).decode()]))()
+
+
+def pem(kind=None):
+    kind = R.choice(["RSA ", "EC ", "OPENSSH ", "", "ENCRYPTED "]) if kind is None else kind
+    return f"-----BEGIN {kind}PRIVATE KEY-----\n{pem_body()}\n-----END {kind}PRIVATE KEY-----"
+
+
+def claims():
+    now = R.randint(1_750_000_000, 1_800_000_000)
+    return R.choice([
+        {"sub": uuid(), "iss": "https://auth.example.org/", "aud": "api", "scope": "read write", "iat": now, "exp": now + 3600},
+        {"iss": "kubernetes/serviceaccount", "kubernetes.io/serviceaccount/namespace": "prod", "sub": "system:serviceaccount:prod:deployer"},
+        {"user_id": R.randint(1, 10**6), "email": "dev@example.org", "role": "admin", "exp": now + 86400},
+        {"iss": "https://gitlab.example.org", "project_path": "group/app", "ref": "main", "exp": now + 300},
+    ])
+
+
+def ntlm(msg_type=3, nt_len=24):
+    lm, off = 24, 72
+    head = b"NTLMSSP\0" + struct.pack("<I", msg_type) + struct.pack("<HHI", lm, lm, off) + struct.pack("<HHI", nt_len, nt_len, off + lm)
+    return base64.b64encode(head + rbytes(40) + rbytes(lm + nt_len + 20)).decode()
+
+
+def sas(sig=None):
+    sig = sig or quote(base64.b64encode(rbytes(32)).decode(), safe="")
+    return f"sv=2022-11-02&ss=b&srt=sco&sp=rwdl&se=2027-0{R.randint(1, 9)}-01T00:00:00Z&st=2026-01-01T00:00:00Z&spr=https&sig={sig}"
+
+
+def acct():
+    return "st" + rnd(R.randint(6, 12), LOWDIG)
+
+
+def storage_key():
+    return base64.b64encode(rbytes(64)).decode()
+
+
+def basic(user, pw):
+    return b64(f"{user}:{pw}")
+
+
+# rule id -> (secret cases, hard-negative clean cases), each a list of (kind, generator)
+RULE_FAMILIES = {
+    "jwt": (
+        [("write", lambda: f"ACCESS_TOKEN={jwt(claims())}\nAPI_URL=https://api.example.org\n"),
+         ("bash", lambda: f"curl -s https://api.example.org/v2/orders -H \"Authorization: Bearer {jwt(claims())}\""),
+         ("write", lambda: json.dumps({"access_token": jwt(claims()), "token_type": "Bearer", "expires_in": 3600}, indent=2)),
+         ("prompt", lambda: f"decode this for me, I think the aud claim is wrong: {jwt(claims())}"),
+         ("write", lambda: f"users:\n- name: deployer\n  user:\n    token: {jwt(claims())}\n"),
+         ("edit", lambda: f"const token = \"{jwt(claims())}\";"),
+         ("bash", lambda: f"export ID_TOKEN={jwt(claims())} && ./deploy.sh"),
+         ("write", lambda: f"GET https://api.example.org/me\nCookie: session={jwt(claims())}; Path=/; HttpOnly\n"),
+         ("mcp", lambda: f"service token for the integration: {jwt(claims())}"),
+         ("prompt", lambda: f"the api returns 403 with {jwt(claims())} since this morning"),
+         ("write", lambda: f"## Testing against staging\n\nUse this token:\n\n    {jwt(claims())}\n"),
+         ("bash", lambda: f"websocat 'wss://ws.example.org/feed?token={jwt(claims())}'")],
+        [("prompt", lambda: "the jwt.io example eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c decodes fine"),
+         ("write", lambda: "NEXT_PUBLIC_SUPABASE_ANON_KEY=" + jwt({"iss": "supabase", "ref": rnd(20, LOWER), "role": "anon", "iat": 1700000000, "exp": 2000000000}) + "\n"),
+         ("bash", lambda: "curl -H \"Authorization: Bearer ${ACCESS_TOKEN}\" https://api.example.org/me"),
+         ("write", lambda: f"token: {b64url({'alg': 'RS256', 'typ': 'JWT'})}.{b64url(claims())}.<signature>\n"),
+         ("edit", lambda: f"TEST_JWT = \"{b64url({'alg': 'HS256', 'typ': 'JWT'})}.{b64url(claims())}.fake-signature-for-unit-tests\""),
+         ("mcp", lambda: f"401 on token {b64url({'alg': 'RS256', 'typ': 'JWT'})}.eyJ... (truncated in the log)"),
+         ("prompt", lambda: "a JWT has the shape xxxxx.yyyyy.zzzzz; header, payload, signature"),
+         ("edit", lambda: "claims = jwt.decode(token, key=jwks, algorithms=[\"RS256\"], audience=\"api\")"),
+         ("write", lambda: f"unsigned: {b64url({'alg': 'none'})}.{b64url(claims())}.\n"),
+         ("write", lambda: f"\"token\": \"{b64url({'alg': 'HS256'})}.{b64url(claims())}.{'x' * 43}\""),
+         ("bash", lambda: "TOKEN=$(gcloud auth print-identity-token) && curl -H \"Authorization: Bearer $TOKEN\" https://run.example.app"),
+         ("mcp", lambda: "the token: [REDACTED JWT], see the incident doc")]),
+    "private-key": (
+        [("write", lambda: pem("OPENSSH ") + "\n"),
+         ("bash", lambda: f"cat > ~/.ssh/deploy_key <<'EOF'\n{pem()}\nEOF\nchmod 600 ~/.ssh/deploy_key"),
+         ("write", lambda: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.key: |\n    " + pem("RSA ").replace("\n", "\n    ") + "\n"),
+         ("write", lambda: f"PRIVATE_KEY=\"{pem('').replace(chr(10), chr(92) + 'n')}\"\n"),
+         ("prompt", lambda: f"here is the deploy key, add it to the CI variables:\n{pem()}"),
+         ("write", lambda: f"resource \"tls_private_key\" \"x\" {{}}\nlocals {{\n  key = <<EOT\n{pem('EC ')}\nEOT\n}}\n"),
+         ("write", lambda: f"-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,{sha(32).upper()}\n\n{pem_body()}\n-----END RSA PRIVATE KEY-----\n"),
+         ("write", lambda: f"-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n{pem_body()}\n={rnd(4, B64)}\n-----END PGP PRIVATE KEY BLOCK-----\n"),
+         ("mcp", lambda: f"key for the bastion:\n```\n{pem('OPENSSH ')}\n```"),
+         ("bash", lambda: f"echo \"{pem('OPENSSH ')}\" | ssh-add -"),
+         ("edit", lambda: f"SIGNING_KEY = \"\"\"{pem('')}\"\"\""),
+         ("write", lambda: json.dumps({"app_id": R.randint(10**5, 10**6), "private_key": pem("RSA ") + "\n"}))],
+        [("prompt", lambda: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"),
+         ("write", lambda: "tls.key: |\n  -----BEGIN PRIVATE KEY-----\n  <your private key here>\n  -----END PRIVATE KEY-----\n"),
+         ("edit", lambda: "if first_line.startswith(\"-----BEGIN OPENSSH PRIVATE KEY-----\"):\n    kind = \"openssh\""),
+         ("edit", lambda: "PEM_RE = re.compile(r\"-----BEGIN (RSA |EC )?PRIVATE KEY-----.*?-----END\", re.S)"),
+         ("bash", lambda: "grep -rl 'BEGIN RSA PRIVATE KEY' --include='*.pem' ."),
+         ("write", lambda: "-----BEGIN PRIVATE KEY-----\n[REDACTED]\n-----END PRIVATE KEY-----\n"),
+         ("write", lambda: "-----BEGIN PRIVATE KEY-----\n{{ .Values.tls.key | indent 2 }}\n-----END PRIVATE KEY-----\n"),
+         ("write", lambda: f"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----\n"),
+         ("write", lambda: f"-----BEGIN CERTIFICATE-----\n{pem_body(20)}\n-----END CERTIFICATE-----\n"),
+         ("mcp", lambda: "the key file starts with -----BEGIN OPENSSH PRIVATE KEY----- and ends with the matching END line"),
+         ("write", lambda: "-----BEGIN PRIVATE KEY-----\n" + "\n".join("A" * 64 for _ in range(8)) + "\n-----END PRIVATE KEY-----\n"),
+         ("bash", lambda: "openssl genpkey -algorithm ed25519 -out key.pem && openssl pkey -in key.pem -pubout")]),
+    "aws-secret-key": (
+        [("write", lambda: f"AWS_ACCESS_KEY_ID={TOKENS['aws-access-key-id']()}\nAWS_SECRET_ACCESS_KEY={rnd(40, B64)}\nAWS_REGION=eu-west-1\n"),
+         ("bash", lambda: f"export AWS_SECRET_ACCESS_KEY={rnd(40, B64)}"),
+         ("bash", lambda: f"docker run --rm -e AWS_ACCESS_KEY_ID={TOKENS['aws-access-key-id']()} -e AWS_SECRET_ACCESS_KEY={rnd(40, B64)} amazon/aws-cli s3 ls"),
+         ("write", lambda: f"- uses: aws-actions/configure-aws-credentials@v4\n  with:\n    aws-access-key-id: {TOKENS['aws-access-key-id']()}\n    aws-secret-access-key: {rnd(40, B64)}\n"),
+         ("write", lambda: json.dumps({"AWS_ACCESS_KEY_ID": TOKENS["aws-access-key-id"](), "AWS_SECRET_ACCESS_KEY": rnd(40, B64)}, indent=2)),
+         ("edit", lambda: f"s3 = boto3.client(\"s3\", aws_access_key_id=\"{TOKENS['aws-access-key-id']()}\", aws_secret_access_key=\"{rnd(40, B64)}\")"),
+         ("write", lambda: f"provider \"aws\" {{\n  region     = \"eu-west-1\"\n  access_key = \"{TOKENS['aws-access-key-id']()}\"\n  secret_key = \"{rnd(40, B64)}\"\n}}\naws_secret_key = \"{rnd(40, B64)}\"\n"),
+         ("prompt", lambda: f"aws secret key: {rnd(40, B64)}"),
+         ("mcp", lambda: f"new creds for the backup user, aws_secret_access_key={rnd(40, B64)}"),
+         ("write", lambda: f"apiVersion: v1\nkind: Secret\nmetadata:\n  name: s3\nstringData:\n  AWS_SECRET_ACCESS_KEY: \"{rnd(40, B64)}\"\n"),
+         ("write", lambda: f"[profile backup]\nregion = eu-central-1\naws_secret_access_key={rnd(40, B64)}\n"),
+         ("bash", lambda: f"aws configure set aws_secret_access_key {rnd(40, B64)} --profile backup")],
+        [("write", lambda: "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"),
+         ("write", lambda: "env:\n  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}\n"),
+         ("write", lambda: "aws_secret_access_key = <your-secret-access-key>\n"),
+         ("bash", lambda: "export AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+         ("edit", lambda: "aws_secret_access_key=os.environ[\"AWS_SECRET_ACCESS_KEY\"],"),
+         ("write", lambda: "AWS_SECRET_ACCESS_KEY: !Ref BackupUserSecretKey\n"),
+         ("write", lambda: f"aws_secret_hash: {sha(40)}\n"),
+         ("prompt", lambda: "AWS_SECRET_ACCESS_KEY=**************************************** in the job log, is that masked properly?"),
+         ("write", lambda: f"spec:\n  encryptedData:\n    AWS_SECRET_ACCESS_KEY: {sealed_blob()}\n"),
+         ("bash", lambda: "aws secretsmanager get-secret-value --secret-id prod/app/aws-secret --query SecretString"),
+         ("mcp", lambda: "the aws secret key for the backup user is in 1Password under Infra/aws-backup"),
+         ("write", lambda: "aws_secret_access_key = {{ aws_backup_secret_key }}\n")]),
+    "azure-storage-key": (
+        [("write", lambda: json.dumps({"ConnectionStrings": {"Blob": f"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()};EndpointSuffix=core.windows.net"}}, indent=2)),
+         ("write", lambda: f"AZURE_STORAGE_CONNECTION_STRING=\"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()};EndpointSuffix=core.windows.net\"\n"),
+         ("bash", lambda: f"az storage blob upload -f dump.sql -c backups -n dump.sql --connection-string 'DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()}'"),
+         ("edit", lambda: f"svc = BlobServiceClient.from_connection_string(\"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()};EndpointSuffix=core.windows.net\")"),
+         ("prompt", lambda: f"why does this fail with 403? AccountName={acct()};AccountKey={storage_key()}"),
+         ("mcp", lambda: f"storage conn string for the import job: DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()};EndpointSuffix=core.windows.net"),
+         ("write", lambda: f"stringData:\n  connection: \"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()};EndpointSuffix=core.windows.net\"\n"),
+         ("write", lambda: f"<add name=\"Storage\" connectionString=\"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey={storage_key()}\" />\n")],
+        [("write", lambda: "AZURE_STORAGE_CONNECTION_STRING=\"DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1\"\n"),
+         ("write", lambda: f"conn: DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey=<storage-account-key>;EndpointSuffix=core.windows.net\n"),
+         ("write", lambda: f"conn: \"DefaultEndpointsProtocol=https;AccountName={acct()};AccountKey=${{STORAGE_KEY}}\"\n"),
+         ("prompt", lambda: f"AccountName={acct()};AccountKey=****;EndpointSuffix=core.windows.net is what the portal shows"),
+         ("write", lambda: "AzureWebJobsStorage=UseDevelopmentStorage=true\n"),
+         ("edit", lambda: "conn = f\"DefaultEndpointsProtocol=https;AccountName={name};AccountKey={key}\""),
+         ("write", lambda: f"BlobEndpoint=https://{acct()}.blob.core.windows.net/;SharedAccessSignature=sv=2022-11-02&sig=REDACTED\n"),
+         ("bash", lambda: "az storage account keys list -g rg-prod -n stprod --query '[0].keyName' -o tsv")]),
+    "private-key-base64": (
+        [("write", lambda: f"apiVersion: v1\nkind: Secret\ntype: kubernetes.io/tls\ndata:\n  tls.crt: {b64('-----BEGIN CERTIFICATE-----' + chr(10) + pem_body(8) + chr(10) + '-----END CERTIFICATE-----')}\n  tls.key: {b64(pem('RSA '))}\n"),
+         ("bash", lambda: f"echo {b64(pem('OPENSSH '))} | base64 -d > ~/.ssh/id_ed25519"),
+         ("write", lambda: f"SSH_PRIVATE_KEY_B64={b64(pem('OPENSSH '))}\n"),
+         ("write", lambda: json.dumps({"key": "SSH_PRIVATE_KEY", "value": b64(pem()), "masked": True})),
+         ("prompt", lambda: f"set this as the GitLab CI variable DEPLOY_KEY: {b64(pem())}"),
+         ("mcp", lambda: f"base64 of the signing key: {b64(pem(''))}"),
+         ("edit", lambda: f"KEY_B64 = \"{b64(pem('EC '))}\""),
+         ("write", lambda: f"users:\n- name: admin\n  user:\n    client-certificate-data: {b64('-----BEGIN CERTIFICATE-----' + chr(10) + pem_body(8) + chr(10) + '-----END CERTIFICATE-----')}\n    client-key-data: {b64(pem('EC '))}\n")],
+        [("write", lambda: f"data:\n  tls.crt: {b64('-----BEGIN CERTIFICATE-----' + chr(10) + pem_body(12) + chr(10) + '-----END CERTIFICATE-----')}\n"),
+         ("write", lambda: f"data:\n  key.pub: {b64('-----BEGIN PUBLIC KEY-----' + chr(10) + pem_body(6) + chr(10) + '-----END PUBLIC KEY-----')}\n"),
+         ("write", lambda: f"tls.key: {b64('-----BEGIN PRIVATE KEY-----' + chr(10) + '...' + chr(10) + '-----END PRIVATE KEY-----')}\n"),
+         ("bash", lambda: f"echo {b64('-----BEGIN PRIVATE KEY-----' + chr(10) + 'MIIE...your key here...' + chr(10) + '-----END PRIVATE KEY-----')} | base64 -d"),
+         ("write", lambda: f"ca.crt: {b64('-----BEGIN CERTIFICATE-----' + chr(10) + pem_body(20) + chr(10) + '-----END CERTIFICATE-----')}\n"),
+         ("prompt", lambda: "grep for LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t to find base64 encoded keys in the repo"),
+         ("write", lambda: "client-key-data: ${CLIENT_KEY_DATA}\n"),
+         ("edit", lambda: "key = base64.b64decode(os.environ[\"SSH_PRIVATE_KEY_B64\"])")]),
+    "ntlm-authenticate": (
+        [("bash", lambda: f"curl -v https://intranet.corp.example/ -H 'Authorization: NTLM {ntlm()}'"),
+         ("prompt", lambda: f"the proxy log shows Authorization: NTLM {ntlm()} and then a 401, why?"),
+         ("write", lambda: f"GET /ews/exchange.asmx HTTP/1.1\nHost: mail.corp.example\nAuthorization: NTLM {ntlm()}\n"),
+         ("mcp", lambda: f"captured header: Proxy-Authorization: NTLM {ntlm(nt_len=R.choice([24, 120, 250]))}"),
+         ("edit", lambda: f"HEADERS = {{\"Authorization\": \"NTLM {ntlm()}\"}}"),
+         ("write", lambda: f"> Authorization: NTLM {ntlm(nt_len=R.randint(100, 300))}\n< HTTP/1.1 200 OK\n")],
+        [("write", lambda: f"> Authorization: NTLM {ntlm(1)}\n< WWW-Authenticate: NTLM {ntlm(2)}\n"),
+         ("prompt", lambda: f"why is the anonymous auth failing? Authorization: NTLM {ntlm(nt_len=0)}"),
+         ("bash", lambda: "curl --ntlm -u \"CORP\\\\$USER:$PASS\" https://intranet.corp.example/"),
+         ("write", lambda: "< HTTP/1.1 401 Unauthorized\n< WWW-Authenticate: Negotiate\n< WWW-Authenticate: NTLM\n"),
+         ("edit", lambda: "auth = HttpNtlmAuth(f\"CORP\\\\{user}\", password)"),
+         ("mcp", lambda: f"NTLM negotiate message from the client: {ntlm(1)}")]),
+    "azure-sas-signature": (
+        [("bash", lambda: f"azcopy copy ./dist 'https://{acct()}.blob.core.windows.net/$web?{sas()}' --recursive"),
+         ("write", lambda: f"AZURE_STORAGE_SAS_TOKEN=\"?{sas()}\"\n"),
+         ("write", lambda: f"BlobEndpoint=https://{acct()}.blob.core.windows.net/;SharedAccessSignature={sas()}\n"),
+         ("prompt", lambda: f"download link for the export: https://{acct()}.blob.core.windows.net/exports/2026-10.csv?{sas()}"),
+         ("edit", lambda: f"SAS_URL = \"https://{acct()}.blob.core.windows.net/backups?{sas()}\""),
+         ("mcp", lambda: f"upload the logs here: https://{acct()}.blob.core.windows.net/support?{sas()}"),
+         ("write", lambda: json.dumps({"sasUrl": f"https://{acct()}.queue.core.windows.net/jobs?{sas()}"}, indent=2)),
+         ("bash", lambda: f"curl -X PUT -T report.pdf -H 'x-ms-blob-type: BlockBlob' \"https://{acct()}.blob.core.windows.net/r/report.pdf?{sas()}\"")],
+        [("write", lambda: f"SAS_URL=https://{acct()}.blob.core.windows.net/c?{sas('<signature>')}\n"),
+         ("write", lambda: f"url: \"https://{acct()}.blob.core.windows.net/c?{sas('REDACTED')}\"\n"),
+         ("bash", lambda: f"azcopy copy ./dist \"https://{acct()}.blob.core.windows.net/web?${{SAS_TOKEN}}\" --recursive"),
+         ("edit", lambda: f"url = f\"https://{{account}}.blob.core.windows.net/{{container}}?{{sas_token}}\""),
+         ("prompt", lambda: f"the SAS looks like ?sv=2022-11-02&ss=b&sp=r&se=...&sig=... right?"),
+         ("write", lambda: f"https://{acct()}.blob.core.windows.net/public/logo.png\n"),
+         ("mcp", lambda: f"link (sig removed): https://{acct()}.blob.core.windows.net/exports/x.csv?sv=2022-11-02&sp=r&se=2027-01-01"),
+         ("write", lambda: f"SAS_URL=https://{acct()}.blob.core.windows.net/c?{sas('x' * 46)}\n")]),
+    "url-credentials": (
+        [("write", lambda: f"DATABASE_URL=postgresql://app:{password()}@pg-{rnd(5, LOWDIG)}.prod.internal:5432/app\n"),
+         ("bash", lambda: f"psql \"postgres://report:{password()}@10.20.{R.randint(0, 255)}.{R.randint(1, 254)}:5432/analytics\" -c '\\dt'"),
+         ("write", lambda: f"spring:\n  data:\n    mongodb:\n      uri: mongodb+srv://svc:{password()}@cluster0.{rnd(5, LOWDIG)}.mongodb.net/app?retryWrites=true\n"),
+         ("bash", lambda: f"git clone https://deploy:{opaque(url=True)}@git.example.org/acme/infra.git"),
+         ("write", lambda: f"export HTTPS_PROXY=http://proxyuser:{password()}@proxy.corp.example:3128\n"),
+         ("write", lambda: f"[global]\nindex-url = https://__token__:{opaque(url=True)}@pypi.example.org/simple\n"),
+         ("prompt", lambda: f"the worker can't connect to amqp://celery:{password()}@rabbitmq.prod:5672/jobs, any idea?"),
+         ("write", lambda: f"[alembic]\nsqlalchemy.url = mysql+pymysql://app:{password()}@db.example.org/app\n"),
+         ("edit", lambda: f"REDIS_URL = \"redis://default:{password()}@redis-{R.randint(10000, 99999)}.cloud.example.com:6379\""),
+         ("mcp", lambda: f"staging db: postgres://admin:{password()}@staging-db.example.org:5432/app"),
+         ("bash", lambda: f"docker run -e DATABASE_URL=postgres://svc:{password()}@db.internal:5432/svc app:latest"),
+         ("write", lambda: f"## Staging\n\nConnect with:\n\n```\nmongosh \"mongodb://root:{password()}@mongo.staging.example.org:27017/admin\"\n```\n")],
+        [("write", lambda: "DATABASE_URL=postgres://app:${DB_PASSWORD}@db.prod.internal:5432/app\n"),
+         ("write", lambda: "url: postgresql://{{ .Values.db.user }}:{{ .Values.db.password }}@{{ .Values.db.host }}/app\n"),
+         ("edit", lambda: "url = f\"postgresql://{user}:{password}@{host}:{port}/{name}\""),
+         ("bash", lambda: f"psql postgres://app:{password()}@localhost:5432/app_dev"),
+         ("write", lambda: "MONGO_URL=mongodb://root:example@mongo:27017/\n"),
+         ("prompt", lambda: "connection string format: postgres://<user>:<password>@<host>:5432/<db>"),
+         ("mcp", lambda: "DB url is postgres://app:****@db.prod.internal:5432/app (password in 1Password)"),
+         ("write", lambda: "REDIS_URL=redis://:changeme@redis:6379/0\n"),
+         ("bash", lambda: "git clone https://oauth2:$(cat ~/.config/glab-token)@gitlab.com/acme/app.git"),
+         ("edit", lambda: "DSN = \"mysql://%s:%s@%s/%s\" % (user, pw, host, db)"),
+         ("write", lambda: f"SENTRY_DSN=https://{sha(32)}@o{R.randint(10**5, 10**6)}.ingest.sentry.io/{R.randint(10**6, 10**7)}\n"),
+         ("write", lambda: "amqp_url: amqp://guest:guest@rabbitmq:5672/\n")]),
+    "authorization-bearer": (
+        [("bash", lambda: f"curl -s -H \"Authorization: Bearer {opaque()}\" https://api.example.org/v1/projects"),
+         ("bash", lambda: f"http GET https://api.example.org/me 'Authorization:Bearer {opaque()}'"),
+         ("edit", lambda: f"headers = {{\"Authorization\": \"Bearer {opaque()}\", \"Accept\": \"application/json\"}}"),
+         ("write", lambda: f"const res = await fetch(url, {{ headers: {{ Authorization: 'Bearer {opaque()}' }} }});\n"),
+         ("write", lambda: f"### list users\nGET https://api.example.org/users\nAuthorization: Bearer {opaque()}\n"),
+         ("bash", lambda: f"curl -H 'Authorization: token {opaque()}' https://git.example.org/api/v1/repos"),
+         ("bash", lambda: f"grpcurl -H 'authorization: Bearer {opaque()}' api.example.org:443 list"),
+         ("prompt", lambda: f"this works in postman but not in the app: Bearer {opaque()}"),
+         ("mcp", lambda: f"use header Authorization: Bearer {opaque()} for the partner API"),
+         ("write", lambda: f"http:\n  headers:\n    Authorization: \"Bearer {opaque()}\"\n"),
+         ("prompt", lambda: f"auth: token {opaque()}"),
+         ("write", lambda: f"> GET /v1/me HTTP/2\n> authorization: Bearer {opaque()}\n< HTTP/2 200\n")],
+        [("bash", lambda: "curl -H \"Authorization: Bearer $TOKEN\" https://api.example.org/v1/me"),
+         ("edit", lambda: "headers = {\"Authorization\": f\"Bearer {token}\"}"),
+         ("write", lambda: "Authorization: Bearer <your-access-token>\n"),
+         ("write", lambda: "Authorization: Bearer {{token}}\n"),
+         ("write", lambda: "Authorization: Bearer YOUR_ACCESS_TOKEN_HERE\n"),
+         ("prompt", lambda: "the log shows Authorization: Bearer [REDACTED] for every request"),
+         ("write", lambda: "headers: { Authorization: 'Bearer ' + accessToken }\n"),
+         ("write", lambda: "< WWW-Authenticate: Bearer realm=\"api\", error=\"invalid_token\"\n"),
+         ("mcp", lambda: "the API uses bearer authentication as described in RFC 6750"),
+         ("prompt", lambda: "token was sent as Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9... and rejected"),
+         ("write", lambda: "Authorization: Bearer xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"),
+         ("bash", lambda: "curl -H \"Authorization: Bearer $(gcloud auth print-access-token)\" https://example.googleapis.com/v1/x")]),
+    "authorization-basic": (
+        [("bash", lambda: f"curl -H 'Authorization: Basic {basic('svc-' + rnd(4, LOWER), password())}' https://api.example.org/v1/export"),
+         ("write", lambda: f"location /metrics {{\n  proxy_set_header Authorization \"Basic {basic('prometheus', password())}\";\n}}\n"),
+         ("edit", lambda: f"headers = {{\"Authorization\": \"Basic {basic('api', opaque())}\"}}"),
+         ("write", lambda: f"GET https://registry.example.org/v2/_catalog\nAuthorization: Basic {basic('bot', password())}\n"),
+         ("bash", lambda: f"curl -H \"Authorization: ApiKey {basic(rnd(20, URLSAFE), rnd(22, URLSAFE))}\" https://es.example.org:9200/_cat/indices"),
+         ("prompt", lambda: f"the webhook sends Authorization: Basic {basic('hook', password())}, can you verify it in the handler?"),
+         ("mcp", lambda: f"partner creds header: Basic {basic('partner-' + rnd(3, LOWDIG), password())}"),
+         ("write", lambda: f"const auth = 'Basic {basic('admin', password())}';\n")],
+        [("bash", lambda: f"curl -H 'Authorization: Basic {basic('user', 'password')}' http://api.example.org"),
+         ("write", lambda: f"Authorization: Basic {basic('admin', 'admin')}\n"),
+         ("write", lambda: f"Authorization: Basic {basic('ci', '${REGISTRY_PASSWORD}')}\n"),
+         ("write", lambda: "Authorization: Basic <base64 user:password>\n"),
+         ("edit", lambda: "headers[\"Authorization\"] = \"Basic \" + base64.b64encode(f\"{user}:{pw}\".encode()).decode()"),
+         ("prompt", lambda: "RFC 7617 example: Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="),
+         ("mcp", lambda: "Use Basic authentication for the registry, credentials are in the vault"),
+         ("write", lambda: "< WWW-Authenticate: Basic realm=\"Restricted\", charset=\"UTF-8\"\n"),
+         ("bash", lambda: f"curl -H 'Authorization: Basic {basic('user', 'xxxxxxxxxxxx')}' https://api.example.org")]),
+    "docker-config-auth": (
+        [("write", lambda: json.dumps({"auths": {"registry.gitlab.com": {"auth": basic("deploy", password())}}}, indent=2)),
+         ("bash", lambda: "echo '" + json.dumps({"auths": {"ghcr.io": {"auth": basic("bot", opaque())}}}) + "' > ~/.docker/config.json"),
+         ("write", lambda: "apiVersion: v1\nkind: Secret\ntype: kubernetes.io/dockerconfigjson\nstringData:\n  .dockerconfigjson: '" + json.dumps({"auths": {"harbor.example.org": {"username": "robot", "auth": basic("robot$ci", password())}}}) + "'\n"),
+         ("prompt", lambda: "my config.json is " + json.dumps({"auths": {"https://index.docker.io/v1/": {"auth": basic("acme", password())}}}) + " but pulls still fail"),
+         ("write", lambda: json.dumps({"data": json.dumps({"auths": {"registry.example.org": {"auth": basic("ci", password())}}})})),
+         ("mcp", lambda: "pull secret: " + json.dumps({"auths": {"registry.example.org": {"auth": basic("pull", password())}}})),
+         ("edit", lambda: "DOCKER_AUTH_CONFIG = '" + json.dumps({"auths": {"registry.example.org:5000": {"auth": basic("svc", password())}}}) + "'")],
+        [("write", lambda: json.dumps({"auths": {"ghcr.io": {}}, "credsStore": "desktop"}, indent=2)),
+         ("write", lambda: json.dumps({"auths": {"registry.gitlab.com": {"auth": basic("gitlab-ci-token", "${CI_JOB_TOKEN}")}}})),
+         ("write", lambda: json.dumps({"auths": {"registry.example.org": {"auth": "<base64 of user:token>"}}})),
+         ("write", lambda: json.dumps({"auths": {"registry.example.org": {"auth": basic("username", "password")}}})),
+         ("write", lambda: json.dumps({"auths": {"registry.example.org": {"auth": ""}}, "credHelpers": {"gcr.io": "gcloud"}})),
+         ("edit", lambda: "cfg = {\"auths\": {host: {\"auth\": base64.b64encode(f\"{user}:{token}\".encode()).decode()}}}"),
+         ("prompt", lambda: "the \"auth\" field is base64 of user:password, right?")]),
+    "curl-user": (
+        [("bash", lambda: f"curl -u admin:{password()} https://jenkins.example.org/api/json"),
+         ("bash", lambda: f"curl -sk -u elastic:{password()} https://es.example.org:9200/_cluster/health"),
+         ("bash", lambda: f"curl --user 'svc:{password()}' -X POST https://api.example.org/v1/import"),
+         ("bash", lambda: f"curl --user=deploy:{opaque()} https://nexus.example.org/repository/raw/app.tgz -T app.tgz"),
+         ("prompt", lambda: f"run curl -u ops:{password()} https://grafana.example.org/api/health for me"),
+         ("write", lambda: f"#!/bin/sh\nset -e\ncurl -fsS -u backup:{password()} -T \"$1\" https://dav.example.org/backups/\n"),
+         ("mcp", lambda: f"to test: curl -u partner:{password()} https://api.example.org/v1/ping"),
+         ("bash", lambda: f"curl -u \"$USER:{opaque()}\" https://bitbucket.example.org/rest/api/1.0/projects")],
+        [("bash", lambda: "curl -u \"admin:$ADMIN_PASSWORD\" https://jenkins.example.org/api/json"),
+         ("bash", lambda: "curl -u elastic:${ELASTIC_PASSWORD} https://es.example.org:9200"),
+         ("bash", lambda: "curl -u user:password https://httpbin.org/basic-auth/user/password"),
+         ("bash", lambda: "curl -u elastic:changeme http://es:9200"),
+         ("bash", lambda: "docker exec -u postgres:postgres db psql -c 'select 1'"),
+         ("bash", lambda: "docker run --rm -u $(id -u):$(id -g) -v $PWD:/src app:latest"),
+         ("bash", lambda: f"docker run -u {R.randint(1000, 1999)}:{R.randint(1000, 1999)} alpine id"),
+         ("write", lambda: "curl -u \"$API_USER:$API_TOKEN\" \"$BASE_URL/export\" -o out.json\n"),
+         ("prompt", lambda: "curl -u <user>:<api-token> https://example.atlassian.net/rest/api/3/myself")]),
+    "cli-password-flag": (
+        [("bash", lambda: f"helm repo add acme https://charts.example.org --username ci --password {password()}"),
+         ("bash", lambda: f"kubectl config set-credentials deployer --token={opaque()}"),
+         ("bash", lambda: f"argocd login argocd.example.org --username admin --password '{password()}'"),
+         ("bash", lambda: f"doctl auth init --access-token {opaque()}"),
+         ("bash", lambda: f"influx setup --org acme --bucket metrics --username admin --password {password()} --token {opaque()} --force"),
+         ("bash", lambda: f"sentry-cli --auth-token {opaque()} releases new 1.4.2"),
+         ("bash", lambda: f"az ad sp create-for-rbac -n ci && az login --service-principal --username {uuid()} --client-secret {opaque()} --tenant {uuid()}"),
+         ("prompt", lambda: f"why does `glab auth login --hostname git.example.org --token {opaque()}` say unauthorized?"),
+         ("write", lambda: f"#!/bin/sh\nexec ./server --db-password={password()} --listen :8080\n"),
+         ("mcp", lambda: f"deploy cmd: ./deploy.sh --env prod --api-key {opaque()}"),
+         ("edit", lambda: f"CMD [\"./worker\", \"--queue\", \"jobs\", \"--secret={opaque()}\"]"),
+         ("bash", lambda: f"vault login -method=userpass username=ci -password {password()}")],
+        [("bash", lambda: "helm repo add acme https://charts.example.org --username ci --password \"$HELM_PASSWORD\""),
+         ("bash", lambda: "echo \"$CI_REGISTRY_PASSWORD\" | docker login --password-stdin -u ci registry.example.org"),
+         ("bash", lambda: "kubectl --token=\"$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" get pods"),
+         ("bash", lambda: "glab auth login --token ${GITLAB_TOKEN} --hostname git.example.org"),
+         ("write", lambda: "  --password string     Password for the registry\n  --token string        Bearer token\n"),
+         ("bash", lambda: "./server --db-password-file /run/secrets/db --token-ttl 3600"),
+         ("bash", lambda: "argocd login argocd.example.org --username admin --password <admin-password>"),
+         ("bash", lambda: "app --api-key ******** --verbose"),
+         ("bash", lambda: "kubectl create secret generic app --from-literal=user=svc --secret-name app-creds"),
+         ("bash", lambda: "mytool --client-secret-file ./client_secret.json --token-file ~/.config/mytool/token"),
+         ("bash", lambda: "terraform apply -var \"db_password=$TF_VAR_db_password\""),
+         ("prompt", lambda: "pass --api-key GITLAB_API_KEY so it reads from the env")]),
+    "securestring-literal": (
+        [("write", lambda: f"$pw = ConvertTo-SecureString '{password()}' -AsPlainText -Force\n$cred = New-Object PSCredential('svc-backup', $pw)\n"),
+         ("bash", lambda: f"pwsh -c \"\\$p = ConvertTo-SecureString \\\"{password()}\\\" -AsPlainText -Force; Connect-AzAccount -Credential (New-Object PSCredential('{uuid()}', \\$p))\""),
+         ("edit", lambda: f"$secure = ConvertTo-SecureString -String \"{password()}\" -AsPlainText -Force"),
+         ("prompt", lambda: f"ConvertTo-SecureString \"{password()}\" -AsPlainText -Force fails on the build agent, why?"),
+         ("mcp", lambda: f"snippet for the runbook: $p = ConvertTo-SecureString '{password()}' -AsPlainText -Force"),
+         ("write", lambda: f"Set-ADAccountPassword -Identity jdoe -NewPassword (ConvertTo-SecureString \"{password()}\" -AsPlainText -Force) -Reset\n")],
+        [("write", lambda: "$pw = ConvertTo-SecureString $env:SVC_PASSWORD -AsPlainText -Force\n"),
+         ("write", lambda: "$secure = Read-Host -AsSecureString | ConvertFrom-SecureString\n"),
+         ("write", lambda: "$pw = Get-Content .\\pw.txt | ConvertTo-SecureString\n"),
+         ("write", lambda: "$pw = ConvertTo-SecureString \"<password>\" -AsPlainText -Force\n"),
+         ("write", lambda: "$pw = ConvertTo-SecureString \"P@ssw0rd!\" -AsPlainText -Force\n"),
+         ("write", lambda: "$pw = ConvertTo-SecureString \"${{ secrets.SVC_PASSWORD }}\" -AsPlainText -Force\n"),
+         ("prompt", lambda: "should I use ConvertTo-SecureString -AsPlainText or Get-Credential here?")]),
+    "curl-setopt": (
+        [("edit", lambda: f"curl_setopt($ch, CURLOPT_USERPWD, \"api:{password()}\");"),
+         ("write", lambda: f"<?php\n$ch = curl_init($url);\ncurl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);\ncurl_setopt($ch, CURLOPT_USERPWD, \"svc:{password()}\");\n"),
+         ("write", lambda: f"curl_easy_setopt(curl, CURLOPT_USERPWD, \"ftpuser:{password()}\");\n"),
+         ("edit", lambda: f"curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, \"{opaque()}\");"),
+         ("write", lambda: f"curl_easy_setopt(h, CURLOPT_PASSWORD, \"{password()}\");\n"),
+         ("prompt", lambda: f"curl_setopt($ch, CURLOPT_PROXYUSERPWD, \"proxy:{password()}\"); gives 407, why?"),
+         ("edit", lambda: f"curl_setopt($ch, CURLOPT_USERPWD, '{rnd(6, LOWER)}:{password()}');")],
+        [("edit", lambda: "curl_setopt($ch, CURLOPT_USERPWD, $user . ':' . $pass);"),
+         ("edit", lambda: "curl_setopt($ch, CURLOPT_USERPWD, \"$user:$password\");"),
+         ("edit", lambda: "curl_setopt($ch, CURLOPT_USERPWD, \"{$this->user}:{$this->pass}\");"),
+         ("write", lambda: "curl_easy_setopt(curl, CURLOPT_USERPWD, \"user:password\");\n"),
+         ("write", lambda: "snprintf(buf, sizeof buf, \"%s:%s\", user, pass);\ncurl_easy_setopt(curl, CURLOPT_USERPWD, buf);\n"),
+         ("edit", lambda: "curl_setopt($ch, CURLOPT_PASSWORD, getenv('FTP_PASSWORD'));"),
+         ("write", lambda: "curl_easy_setopt(curl, CURLOPT_PASSWORD, \"<your password>\");\n")]),
+    "short-password-flag": (
+        [("bash", lambda: f"mysql -h db.prod.internal -u app -p{password()} app -e 'show tables'"),
+         ("bash", lambda: f"mysql -uroot -p'{password()}' -h 10.0.{R.randint(0, 9)}.{R.randint(2, 250)}"),
+         ("bash", lambda: f"mysqldump --single-transaction -u backup -p\"{password()}\" shop | gzip > shop.sql.gz"),
+         ("bash", lambda: f"kubectl exec -it mariadb-0 -- mariadb -uroot -p{password()}"),
+         ("bash", lambda: f"mongosh mongodb://db.internal:27017/admin -u admin -p'{password()}'"),
+         ("write", lambda: f"#!/bin/sh\nmysqldump -u backup -p{password()} --all-databases > /backup/all.sql\n"),
+         ("prompt", lambda: f"`mysql -u report -p{password()} analytics` gives access denied"),
+         ("mcp", lambda: f"restore with: mysql -u root -p'{password()}' shop < dump.sql"),
+         ("bash", lambda: f"docker login -u bot -p{opaque()} registry.example.org")],
+        [("bash", lambda: "mysql -u root -p app"),
+         ("bash", lambda: "mysql -uroot -p$MYSQL_ROOT_PASSWORD -e 'select 1'"),
+         ("bash", lambda: "mysql -u app -p\"${DB_PASSWORD}\" app"),
+         ("bash", lambda: "mysqldump -u backup -p --all-databases > all.sql"),
+         ("bash", lambda: f"docker run --name mysql -p3306:3306 -e MYSQL_ROOT_PASSWORD_FILE=/run/secrets/db mysql:8"),
+         ("bash", lambda: "mysql -h db -P 3306 -u app -pchangeme app"),
+         ("bash", lambda: "mongosh --host db --port 27017 -u admin -p --authenticationDatabase admin"),
+         ("bash", lambda: "docker login -u bot -p $CI_REGISTRY_PASSWORD registry.example.org")]),
+    "sshpass": (
+        [("bash", lambda: f"sshpass -p '{password()}' ssh -o StrictHostKeyChecking=no root@10.0.{R.randint(0, 9)}.{R.randint(2, 250)}"),
+         ("bash", lambda: f"sshpass -p {password()} scp backup.tar.gz admin@nas.example.org:/volume1/backup/"),
+         ("bash", lambda: f"rsync -az -e \"sshpass -p {password()} ssh\" ./dist/ deploy@web01.example.org:/srv/app/"),
+         ("write", lambda: f"#!/bin/sh\nsshpass -p\"{password()}\" ssh ops@switch01 'show running-config'\n"),
+         ("prompt", lambda: f"sshpass -p '{password()}' ssh pi@192.168.2.40 hangs, why?"),
+         ("mcp", lambda: f"to get in: sshpass -p '{password()}' ssh admin@bastion.example.org")],
+        [("bash", lambda: "sshpass -e ssh deploy@web01.example.org"),
+         ("bash", lambda: "sshpass -f ~/.config/nas-pw scp backup.tar.gz admin@nas:/backup/"),
+         ("bash", lambda: "sshpass -p \"$SSHPASS\" ssh root@10.0.0.7"),
+         ("bash", lambda: "sshpass -p password ssh user@host"),
+         ("bash", lambda: "sshpass -p raspberry ssh pi@raspberrypi.local"),
+         ("write", lambda: "sshpass -p '<password>' ssh admin@<host>\n"),
+         ("bash", lambda: "sshpass -p \"$(op read op://Infra/nas/password)\" ssh admin@nas")]),
+    "prose-secret": (
+        [("prompt", lambda: f"the staging admin password is {password()}"),
+         ("prompt", lambda: f"api key = {opaque()} for the partner sandbox"),
+         ("mcp", lambda: f"new token: {opaque()} (old one is revoked)"),
+         ("prompt", lambda: f"het wachtwoord is {password()} voor de nas"),
+         ("write", lambda: f"# Staging access\n\n- url: https://staging.example.org\n- user: admin\n- password: {password()}\n"),
+         ("prompt", lambda: f"password: `{password()}` user: ops"),
+         ("mcp", lambda: f"the passphrase is {password()} for the backup key"),
+         ("prompt", lambda: f"secret is {opaque()}, set it as WEBHOOK_SECRET"),
+         ("edit", lambda: f"# deploy notes: api key is {opaque()} until the rotation on Friday"),
+         ("mcp", lambda: f"wifi gasten: wachtwoord is {password()}"),
+         ("prompt", lambda: f"use this token: {opaque()}"),
+         ("write", lambda: f"Release checklist\n1. log in as release-bot, password was {password()}\n2. tag the build\n")],
+        [("prompt", lambda: "the password is required for the staging login"),
+         ("prompt", lambda: "token is expired again, can you check the refresh flow?"),
+         ("mcp", lambda: "the secret is stored in 1Password under Infra/staging"),
+         ("prompt", lambda: "password is ******** in the screenshot, so it's masked"),
+         ("prompt", lambda: "api key: see the CI variables in the project settings"),
+         ("mcp", lambda: "token: <redacted>, rotated after the incident"),
+         ("prompt", lambda: "the password is stored at ~/.pgpass so psql picks it up"),
+         ("prompt", lambda: "password is P@ssw0rd! in all the tutorials, that's why it gets brute forced"),
+         ("prompt", lambda: "token: ${GITLAB_TOKEN} should expand in the job"),
+         ("prompt", lambda: "the password was incorrect three times, the account is locked"),
+         ("mcp", lambda: "wachtwoord is verlopen, graag resetten"),
+         ("prompt", lambda: "the token is GITLAB_TOKEN from the env, not the bot one"),
+         ("prompt", lambda: "secret is mounted at /var/run/secrets/app/token")]),
+    "generic-assignment": (
+        [("write", lambda: f"STRIPE_WEBHOOK_SIGNING_KEY={opaque()}\nAPP_ENV=production\n"),
+         ("write", lambda: f"oauth:\n  client_id: {uuid()}\n  client_secret: {opaque()}\n"),
+         ("write", lambda: json.dumps({"apiKey": opaque(), "region": "eu-west-1"}, indent=2)),
+         ("write", lambda: f"[service]\napi_key = \"{opaque()}\"\ntimeout = 30\n"),
+         ("edit", lambda: f"config.secret_key_base = \"{sha(128)}\""),
+         ("edit", lambda: f"const signingKey = \"{opaque()}\""),
+         ("edit", lambda: f"webhookSecret := \"{opaque()}\""),
+         ("edit", lambda: f"'password' => '{password()}',"),
+         ("write", lambda: f"services:\n  db:\n    image: postgres:16\n    environment:\n      - POSTGRES_PASSWORD={password()}\n"),
+         ("write", lambda: f"app.jwt.secret={opaque()}\nserver.port=8080\n"),
+         ("bash", lambda: f"export ENCRYPTION_KEY={sha(64)}"),
+         ("prompt", lambda: f"set MASTER_KEY={opaque()} in the env and restart"),
+         ("mcp", lambda: f"credentials={password()} for the ftp drop"),
+         ("write", lambda: f"variable \"x\" {{}}\nclient_secret = \"{opaque()}\"\n")],
+        [("write", lambda: "token_type = \"bearer\"\napi_key_header = \"X-API-Key\"\n"),
+         ("write", lambda: "secret_name: prod-db-credentials\npassword_min_length: 12\n"),
+         ("write", lambda: f"PASSWORD_HASH=\"$2b$12${rnd(53, A62 + './')}\"\n"),
+         ("edit", lambda: "token = generate_token(user, scopes=[\"read\"])"),
+         ("write", lambda: "api_key: ${API_KEY}\nclient_secret: \"{{ vault_client_secret }}\"\n"),
+         ("write", lambda: "secret: !Ref DbSecret\npassword: \"<%= ENV['DB_PASSWORD'] %>\"\n"),
+         ("edit", lambda: "SECRET_KEY = os.environ[\"SECRET_KEY\"]"),
+         ("write", lambda: f"api_key_id: {uuid()}\ntoken_hash: {sha()}\n"),
+         ("write", lambda: "credentials_path: /etc/app/credentials.json\nsecret_key_ref: app-secrets\n"),
+         ("edit", lambda: "apiKey: process.env.PARTNER_API_KEY,"),
+         ("write", lambda: "auth_token_ttl: 3600\ntoken_url: https://auth.example.org/oauth/token\n"),
+         ("edit", lambda: "signingKey: signingKeyFromEnv,"),
+         ("write", lambda: "masterKey: \"test-master-key-not-real\"\nencryption_key: \"0000000000000000\"\n"),
+         ("write", lambda: "password: \"{{ lookup('env', 'DB_PASSWORD') }}\"\nprivate_key: |\n"),
+         ("write", lambda: "SECRET_KEY_BASE: <%= Rails.application.credentials.secret_key_base %>\n")]),
+}
+
+
 # --------------------------------------------------------------------------- events
 
 
@@ -427,6 +869,12 @@ def main():
         for kind in ("prompt", "bash", "write", "mcp"):
             for _ in range(6):
                 emit("secret", kind, family, gen())
+
+    for rule, (positives, negatives) in RULE_FAMILIES.items():
+        for label, cases in (("secret", positives), ("clean", negatives)):
+            for _ in range(-(-70 // len(cases))):
+                for kind, gen in cases:
+                    emit(label, kind, f"ctx-{rule}", gen())
 
     for family, gen in CLEAN:
         for kind in ("prompt", "bash", "write", "edit", "mcp"):

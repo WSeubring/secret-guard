@@ -27,7 +27,7 @@ pub const GATED: &[(&str, &str)] = &[
     ),
     (
         "curl-setopt",
-        r#"\bCURLOPT_(?:PROXY)?(?:PASSWORD|USERPWD|KEYPASSWD|XOAUTH2_BEARER)[ \t]*,[ \t]*"(?:[^"\s:]*:)?(?P<body>[^"\s]+)""#,
+        r#"\bCURLOPT_(?:PROXY)?(?:PASSWORD|USERPWD|KEYPASSWD|XOAUTH2_BEARER)[ \t]*,[ \t]*["'](?:[^"'\s:]*:)?(?P<body>[^"'\s]+)["']"#,
     ),
     (
         "short-password-flag",

@@ -78,10 +78,11 @@ Measured on this machine:
 
 | | gitleaks 8 (`stdin`) | secret-guard |
 |---|---|---|
-| Latency per call | ~29 ms | ~1.3 ms |
+| Latency per call | ~29 ms | ~0.7 ms |
 | Helm `checksum/secret: <sha256>` | false positive | clean |
 | Password forms (DB URL, `DB_PASSWORD=`, prose, `mysql -p`, `curl -u`, YAML) | 0 / 6 detected | 6 / 6 |
 | Reads hook JSON | needs a wrapper | native |
+| [CredData](#public-benchmark-creddata) precision / recall | 0.856 / 0.450 | 0.898 / 0.304 |
 
 ## Detection
 
@@ -167,8 +168,36 @@ Results on the labelled set (3 seeds):
 
 | Set | Size | Result |
 |---|---|---|
-| Secret cases | 6,894 | recall 99.93 % |
-| Clean cases | 10,260 | 0 false positives |
+| Secret cases | 7,914 | recall 99.79 % |
+| Clean cases | 11,340 | 0 false positives |
 
 The remaining misses are random passwords that look like a placeholder, reference or
 code (a placeholder word such as `baz`, a leading `!`, an embedded `==`).
+
+The labelled set is written alongside the rules, so it measures regressions rather than
+real-world recall. For that, see the public benchmark below.
+
+### Public benchmark: CredData
+
+[Samsung CredData](https://github.com/Samsung/CredData) is a labelled dataset of 297
+public repositories (19.5M lines, 67,896 labelled lines, 15,753 credentials) with the
+real values replaced by realistic fakes. Scored per labelled line with
+`eval/creddata.py` (setup steps in its docstring); `--quick` scores a per-category
+sample in seconds.
+
+| Scanner | Precision | Recall | F1 | Hits on unlabelled lines |
+|---|---|---|---|---|
+| secret-guard | **0.898** | 0.304 | 0.454 | 126 |
+| gitleaks 8 | 0.856 | **0.450** | **0.590** | 488 |
+
+Recall is lower by design. Most remaining misses are values that are not worth blocking
+in a prompt or tool call, or that cannot be told apart from test data:
+
+- UUIDs, nonces and salts labelled as credentials (`_postman_id`, OAuth nonces).
+- Short or dictionary-like passwords: CredData replaces each character with a random
+  one of the same class, so `postgres` becomes `xkqjzmwp`, which looks like a word to
+  a classifier that rejects words.
+- A bare `key = <value>` without `api`/`secret`/`private` in the name: accepting it
+  added more false positives than credentials.
+- Credentials in `localhost` URLs, exempt on purpose.
+- Encrypted keys (PASERK `seal`, `-pw`, `-wrap`), which do not need rotating on their own.

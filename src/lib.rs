@@ -18,6 +18,7 @@ use rules::RULES;
 
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Unicode-free regexes compile in a fraction of the time, and every process compiles from scratch.
 pub(crate) fn ascii_regex(p: &str) -> Regex {
@@ -152,4 +153,31 @@ pub fn mask(text: &str, findings: &[Finding]) -> String {
         out.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
     }
     out
+}
+
+/// No characters of the secret: block messages reach the model, and even a prefix narrows a password.
+pub fn hidden(secret: &str) -> String {
+    format!("{} chars", secret.chars().count())
+}
+
+/// `width` chars either side of a finding, the secret hidden, and long digit-bearing tokens nearby hidden too.
+pub fn redacted_context(text: &str, f: &Finding, width: usize) -> String {
+    let before: String = {
+        let mut v: Vec<char> = text[..f.start].chars().rev().take(width).collect();
+        v.reverse();
+        v.into_iter().collect()
+    };
+    let after: String = text[f.end..].chars().take(width).collect();
+    format!("{}«{}»{}", hide_tokens(&before), hidden(&f.secret), hide_tokens(&after)).replace('\n', "⏎")
+}
+
+/// Runs of 12+ token chars that contain a digit become `#<len>`: neighbouring values may be secrets too.
+fn hide_tokens(s: &str) -> String {
+    static TOKEN: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"[A-Za-z0-9+/=_~.-]{12,}"));
+    TOKEN
+        .replace_all(s, |c: &regex::Captures| {
+            let t = &c[0];
+            if t.bytes().any(|b| b.is_ascii_digit()) { format!("#{}", t.len()) } else { t.to_string() }
+        })
+        .into_owned()
 }

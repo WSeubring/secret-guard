@@ -1,6 +1,12 @@
-use secret_guard::decision::{decide, fingerprint, Decision, Policy};
+use secret_guard::decision::{fingerprint, Decision, Policy};
+use secret_guard::hook::Event;
+use serde_json::Value;
 use serde_json::json;
 use std::collections::HashSet;
+
+fn decide(ev: &Value, policy: impl FnOnce() -> Policy) -> Decision {
+    secret_guard::decision::decide(&Event::parse(ev), policy)
+}
 
 fn token() -> String {
     format!("ghp_{}", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3kL6")
@@ -59,7 +65,7 @@ fn fingerprint_depends_on_salt() {
 fn redacted_context_hides_secret_and_neighbouring_tokens() {
     let text = format!("TOKEN={} region: eu-west-1 id: build20261013xk29fq done", token());
     let f = &secret_guard::scan_text(&text)[0];
-    let ctx = secret_guard::decision::redacted_context(&text, f, 50);
+    let ctx = secret_guard::redacted_context(&text, f, 50);
     assert!(!ctx.contains(&token()));
     assert!(ctx.contains("«40 chars»"));
     assert!(ctx.contains("region: eu-west-1"));
@@ -126,7 +132,7 @@ fn post_tool_use_redacts_output_and_keeps_its_shape() {
         other => panic!("expected redact, got {other:?}"),
     }
     let clean = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": "ok"}});
-    assert_eq!(decide(&clean, policy(&[])), Decision::Allow);
+    assert_eq!(decide(&clean, || panic!("policy loaded for clean output")), Decision::Allow);
     let allowed = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": token()}});
     assert_eq!(decide(&allowed, policy(&[fingerprint(b"salt", &token())])), Decision::Allow);
 }

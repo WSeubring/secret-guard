@@ -1,13 +1,13 @@
-//! What the hook does with a Claude Code event: allow it, or block it with a message.
+//! What the hook does with a Claude Code event: allow, steer, block or redact it.
 
-use crate::hook::{scan_event, Event};
-use crate::{mask, raw_secret_output, scan_text, Finding};
+use crate::hook::Event;
+use crate::{hidden, mask, raw_secret_output, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use regex::Regex;
+use std::cell::LazyCell;
 use std::collections::HashSet;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::LazyLock;
 
 /// Allowlist state, loaded only when the event has findings.
 pub struct Policy {
@@ -43,11 +43,6 @@ pub fn fingerprint(salt: &[u8], secret: &str) -> String {
     h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// No characters of the secret: block messages reach the model, and even a prefix narrows a password.
-pub fn redact(s: &str) -> String {
-    format!("{} chars", s.chars().count())
-}
-
 /// Text of a file worth scanning; `None` for missing, non-regular, over `MAX_FILE_BYTES` or binary files.
 fn read_text(path: &Path) -> Option<String> {
     const MAX_FILE_BYTES: u64 = 2 << 20;
@@ -62,35 +57,39 @@ fn read_text(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&data).into_owned())
 }
 
-fn scan_all(event: &Value) -> Vec<Finding> {
-    let mut findings = scan_event(event);
-    for path in Event::parse(event).files() {
-        let Some(text) = read_text(&path) else { continue };
-        for mut f in scan_text(&text) {
-            f.field = format!("file {}", path.display());
-            findings.push(f);
-        }
-    }
-    findings
-}
+type Lazy<F> = LazyCell<Policy, F>;
 
 /// Shown to the model when the scanner failed: the call goes through, so the model must keep secrets out itself.
 pub const UNSCANNED: &str = "secret-guard could not scan this call (internal error), so it was allowed unchecked. \
     Do not put secret values in tool calls or print them in output; reference them indirectly (env var, file, \
     secret manager).";
 
-/// `kubectl get secret -o yaml`, `op read`: a Bash command whose output would be secret values.
-fn bash_exposure(event: &Value) -> Option<String> {
-    let Event::PreTool { tool: "Bash", input: Some(input), .. } = Event::parse(event) else { return None };
-    raw_secret_output(input.get("command")?.as_str()?)
+/// Tool output is redacted, everything else is blocked. The policy loads only once something is found, and a
+/// scanner panic steers instead of blocking: only a found secret is worth stopping work for.
+pub fn decide(event: &Event, policy: impl FnOnce() -> Policy) -> Decision {
+    let policy = LazyCell::new(policy);
+    catch_unwind(AssertUnwindSafe(|| match event {
+        Event::PostTool { response } => redact_output(*response, &policy),
+        _ => check_input(event, &policy),
+    }))
+    .unwrap_or_else(|_| Decision::Steer(UNSCANNED.into()))
 }
 
-/// A scanner panic steers instead of blocking: only a found secret is worth stopping work for.
-pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
-    let Ok((findings, exposure)) = std::panic::catch_unwind(|| (scan_all(event), bash_exposure(event))) else {
-        return Decision::Steer(UNSCANNED.into());
-    };
-    if let Some(what) = exposure {
+fn redact_output(response: Option<&Value>, policy: &Lazy<impl FnOnce() -> Policy>) -> Decision {
+    let mut output = response.cloned().unwrap_or(Value::Null);
+    let n = redact_strings(&mut output, policy);
+    if n == 0 {
+        return Decision::Allow;
+    }
+    let note = format!(
+        "secret-guard replaced {n} secret value(s) in this tool output with [secret-guard: <rule> redacted]. \
+         Work with the redacted output; do not try to recover the values."
+    );
+    Decision::Redact { output, note }
+}
+
+fn check_input(event: &Event, policy: &Lazy<impl FnOnce() -> Policy>) -> Decision {
+    if let Some(what) = bash_exposure(event) {
         return Decision::Block(format!(
             "secret-guard: blocked Bash call, `{what}` would print secret values into the conversation, \
              and anything printed there has to be rotated. Keep the values out of the output: pipe them into the \
@@ -99,34 +98,31 @@ pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
              outside this session."
         ));
     }
-    if findings.is_empty() {
-        return Decision::Allow;
-    }
-    let policy = policy();
-    let event = Event::parse(event);
-    if let Event::PostTool { response } = event {
-        let mut output = response.cloned().unwrap_or(Value::Null);
-        let n = redact_strings(&mut output, &policy);
-        if n == 0 {
-            return Decision::Allow;
+    let mut findings = event.scan();
+    for path in event.files() {
+        let Some(text) = read_text(&path) else { continue };
+        for mut f in scan_text(&text) {
+            f.field = format!("file {}", path.display());
+            findings.push(f);
         }
-        let note = format!(
-            "secret-guard replaced {n} secret value(s) in this tool output with [secret-guard: <rule> redacted]. \
-             Work with the redacted output; do not try to recover the values."
-        );
-        return Decision::Redact { output, note };
     }
-    let findings: Vec<Finding> = findings.into_iter().filter(|f| policy.reports(f)).collect();
+    findings.retain(|f| policy.reports(f));
     if findings.is_empty() {
         return Decision::Allow;
     }
-    Decision::Block(block_message(&event, &findings, &policy))
+    Decision::Block(block_message(event, &findings, policy))
+}
+
+/// `kubectl get secret -o yaml`, `op read`: a Bash command whose output would be secret values.
+fn bash_exposure(event: &Event) -> Option<String> {
+    let Event::PreTool { tool: "Bash", input: Some(input), .. } = event else { return None };
+    raw_secret_output(input.get("command")?.as_str()?)
 }
 
 fn block_message(event: &Event, findings: &[Finding], policy: &Policy) -> String {
     let lines: Vec<String> = findings
         .iter()
-        .map(|f| format!("  - {} in {}: {} [fingerprint {}]", f.rule, f.field, redact(&f.secret), fingerprint(&policy.salt, &f.secret)))
+        .map(|f| format!("  - {} in {}: {} [fingerprint {}]", f.rule, f.field, hidden(&f.secret), fingerprint(&policy.salt, &f.secret)))
         .collect();
     let lines = lines.join("\n");
     if let Event::Prompt { .. } = event {
@@ -161,7 +157,7 @@ fn block_message(event: &Event, findings: &[Finding], policy: &Policy) -> String
 }
 
 /// Replace every reported secret in the strings of `v`, keeping its shape so the tool's output schema still matches.
-fn redact_strings(v: &mut Value, policy: &Policy) -> usize {
+fn redact_strings(v: &mut Value, policy: &Lazy<impl FnOnce() -> Policy>) -> usize {
     match v {
         Value::String(s) => {
             let found: Vec<Finding> = scan_text(s).into_iter().filter(|f| policy.reports(f)).collect();
@@ -172,26 +168,4 @@ fn redact_strings(v: &mut Value, policy: &Policy) -> usize {
         Value::Object(map) => map.values_mut().map(|i| redact_strings(i, policy)).sum(),
         _ => 0,
     }
-}
-
-/// `width` chars either side of a finding, the secret masked, and long digit-bearing tokens nearby hidden too.
-pub fn redacted_context(text: &str, f: &Finding, width: usize) -> String {
-    let before: String = {
-        let mut v: Vec<char> = text[..f.start].chars().rev().take(width).collect();
-        v.reverse();
-        v.into_iter().collect()
-    };
-    let after: String = text[f.end..].chars().take(width).collect();
-    format!("{}«{}»{}", hide_tokens(&before), redact(&f.secret), hide_tokens(&after)).replace('\n', "⏎")
-}
-
-/// Runs of 12+ token chars that contain a digit become `#<len>`: neighbouring values may be secrets too.
-fn hide_tokens(s: &str) -> String {
-    static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/=_~.-]{12,}").unwrap());
-    TOKEN
-        .replace_all(s, |c: &regex::Captures| {
-            let t = &c[0];
-            if t.bytes().any(|b| b.is_ascii_digit()) { format!("#{}", t.len()) } else { t.to_string() }
-        })
-        .into_owned()
 }

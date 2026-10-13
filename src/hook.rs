@@ -1,7 +1,7 @@
 //! The Claude Code hook protocol: what an event carries, and the reply that goes back.
 
 use crate::decision::{decide, Decision, Policy};
-use crate::{bytes_regex, ascii_regex, explain_text, scan_text, Finding, Rejection};
+use crate::{ascii_regex, bytes_regex, explain_text, scan_text, Finding, Rejection};
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -50,6 +50,18 @@ impl<'a> Event<'a> {
             _ => {}
         }
         items
+    }
+
+    /// Findings in `fields`, each naming its field.
+    pub fn scan(&self) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for (field, text) in self.fields() {
+            for mut f in scan_text(text) {
+                f.field = field.clone();
+                out.push(f);
+            }
+        }
+        out
     }
 
     /// Files whose content the event sends on unredacted: `Artifact` targets, and `@`-mentions in a prompt, which
@@ -118,14 +130,7 @@ fn resolve(path: &str, cwd: &Path) -> PathBuf {
 
 /// Scan a hook event's fields; each finding names its field.
 pub fn scan_event(event: &Value) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for (field, text) in Event::parse(event).fields() {
-        for mut f in scan_text(text) {
-            f.field = field.clone();
-            out.push(f);
-        }
-    }
-    out
+    Event::parse(event).scan()
 }
 
 /// Candidates in a hook event that were not reported, with the reason.
@@ -149,8 +154,9 @@ pub struct Reply {
 }
 
 pub fn respond(event: &Value, policy: impl FnOnce() -> Policy) -> Reply {
-    let name = Event::parse(event).name();
-    let (code, stderr, stdout) = match decide(event, policy) {
+    let event = Event::parse(event);
+    let name = event.name();
+    let (code, stderr, stdout) = match decide(&event, policy) {
         Decision::Allow => (0, None, None),
         Decision::Block(msg) => (2, Some(msg), None),
         Decision::Steer(note) => (0, None, Some(json!({"hookEventName": name, "additionalContext": note}))),

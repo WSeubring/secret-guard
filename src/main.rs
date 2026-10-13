@@ -1,4 +1,4 @@
-//! secret-guard: Claude Code hook that blocks secrets in user prompts and tool calls.
+//! secret-guard: Claude Code hook that blocks secrets in prompts and tool calls, and redacts them in tool output.
 //!
 //! Modes:
 //!   secret-guard            hook mode: hook event JSON on stdin, exit 2 to block
@@ -13,9 +13,9 @@
 //! SECRET_GUARD_DISABLE=1, or a file named `disabled` in the config dir, disables it. False positives go in
 //! ~/.config/secret-guard/allowlist.txt as one fingerprint per line.
 
-use secret_guard::decision::{redact, redacted_context, Policy};
+use secret_guard::decision::Policy;
 use secret_guard::hook::{respond, Event};
-use secret_guard::{explain_event, mask, scan_event, scan_text};
+use secret_guard::{explain_event, hidden, mask, redacted_context, scan_event, scan_text};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -97,7 +97,7 @@ fn scan() -> ExitCode {
     let _ = io::stdin().read_to_string(&mut input);
     let findings = scan_text(&input);
     for f in &findings {
-        println!("{}\t{}..{}\t{}", f.rule, f.start, f.end, redact(&f.secret));
+        println!("{}\t{}..{}\t{}", f.rule, f.start, f.end, hidden(&f.secret));
     }
     if findings.is_empty() {
         ExitCode::SUCCESS

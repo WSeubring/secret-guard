@@ -1,0 +1,21 @@
+[package]
+name = "secret-guard"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code hook that blocks secrets in user prompts and tool calls"
+
+[dependencies]
+regex = "1.12"
+regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-search"] }
+serde_json = "1.0"
+sha2 = "0.10"
+
+[build-dependencies]
+regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-build", "syntax"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true

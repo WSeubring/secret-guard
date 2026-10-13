@@ -1,0 +1,3 @@
+# Static glibc skips the dynamic loader: ~0.5 ms off every hook call.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]

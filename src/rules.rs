@@ -91,6 +91,7 @@ pub(crate) enum Check {
     Strong,
     Prose,
     BasicAuth,
+    Ntlm,
     Conn,
     AwsSecret,
     Assignment,
@@ -234,6 +235,7 @@ pub(crate) static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         r"(?P<body>https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{60,})",
         Check::HighEntropy(3.5),
     );
+    add("ntlm-authenticate", &["TlRMTVNTUAAD"], false, r"(?P<body>TlRMTVNTUAAD[A-Za-z0-9+/]{40,}={0,2})", Check::Ntlm);
     add("azure-sas-signature", &["sig="], false, r"[?&]sig=(?P<body>[A-Za-z0-9%+/=]{40,})", Check::Sas);
     add(
         "url-credentials", &["://"], false,
@@ -241,13 +243,18 @@ pub(crate) static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         Check::Conn,
     );
     add(
-        "authorization-bearer", followed_by(&["auth"], &["\"", "'", " ", "\t", ":", "=", "orization"]), true,
+        "authorization-bearer", &["bearer ", "bearer\t", "token ", "token\t"], true,
         gated("authorization-bearer"),
         Check::Strong,
     );
     add(
-        "authorization-basic", followed_by(&["auth"], &["\"", "'", " ", "\t", ":", "=", "orization"]), true,
+        "authorization-basic", &["basic ", "basic\t", "apikey ", "apikey\t"], true,
         gated("authorization-basic"),
+        Check::BasicAuth,
+    );
+    add(
+        "docker-config-auth", &["\"auth\"", "\"auth\\\""], false,
+        r#""auth\\?"[ \t]*:[ \t]*\\?"(?P<body>[A-Za-z0-9+/]{8,}={0,2})\\?""#,
         Check::BasicAuth,
     );
     add(
@@ -423,6 +430,11 @@ impl Check {
                     .and_then(|t| t.split_once(':').map(|(_, p)| p.to_string()))
                     .ok_or(Reason::NotBasicCredential)?;
                 secret_value(&password, Context::Decoded)
+            }
+            Check::Ntlm => {
+                let msg = b64decode_loose(body).ok_or(Reason::NotNtlmResponse)?;
+                let nt_len = msg.get(20..22).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
+                if nt_len > 0 { Ok(()) } else { Err(Reason::NotNtlmResponse) }
             }
             Check::Conn => local(span.start).and_then(|_| secret_value(&percent_decode(body), Context::Quoted)),
             Check::Assignment => {

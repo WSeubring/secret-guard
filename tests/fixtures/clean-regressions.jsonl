@@ -24,3 +24,5 @@
 "DATABASE_URL=postgres://app:Xk29fLm2pQ7vR4@localhost:5432/app"
 "New pws stored in 1Password: {lower26} (Project: Acme, develop) and {lower26} (staging)."
 "**The secret is base64-encoded** (a k8s value under a neutral key). Decoded and rescanned."
+"Use basic authentication or a token. Servers answer WWW-Authenticate: Bearer realm=\"example\", error=\"invalid_token\" or Basic realm=\"Restricted Area\"; the ApiKey header is optional.\n"
+"{\"auths\": {\"registry.example.org\": {\"auth\": \"{hex40}\"}}}\nWWW-Authenticate: NTLM TlRMTVNTUAACAAAADAAMADAAAAAB{hex40}\n"

@@ -279,6 +279,7 @@ pub enum Reason {
     NoKeyMaterial,
     NoSasVersion,
     NotBasicCredential,
+    NotNtlmResponse,
 }
 
 /// Where a value was found, which sets how much evidence it needs.

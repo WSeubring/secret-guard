@@ -7,11 +7,11 @@ pub const GATED: &[(&str, &str)] = &[
     ),
     (
         "authorization-bearer",
-        r#"(?i)\b(?:authorization|auth)["']?[ \t]*[:=][ \t]*["']?(?:bearer|token)[ \t]+(?P<body>[A-Za-z0-9._~+/=-]{16,})"#,
+        r#"(?i)(?:\b(?:authorization|auth)["']?[ \t]*[:=][ \t]*["']?token|\bbearer)[ \t]+(?P<body>[A-Za-z0-9._~+/=-]{16,})"#,
     ),
     (
         "authorization-basic",
-        r#"(?i)\b(?:authorization|auth)["']?[ \t]*[:=][ \t]*["']?basic[ \t]+(?P<body>[A-Za-z0-9+/]{8,}={0,2})"#,
+        r#"(?i)\b(?:basic|apikey)[ \t]+(?P<body>[A-Za-z0-9+/]{8,}={0,2})"#,
     ),
     (
         "curl-user",

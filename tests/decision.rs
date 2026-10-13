@@ -106,3 +106,25 @@ fn other_tools_do_not_read_files() {
     let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {"file_path": dir.join(".env"), "content": "x"}});
     assert_eq!(decide(&ev, policy(&[])), Decision::Allow);
 }
+
+#[test]
+fn post_tool_use_redacts_output_and_keeps_its_shape() {
+    let ev = json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "./deploy.sh"},
+        "tool_response": {"stdout": format!("using {}\nok", token()), "stderr": "", "interrupted": false, "isImage": false}
+    });
+    match decide(&ev, policy(&[])) {
+        Decision::Redact { output, note } => {
+            assert_eq!(output["stdout"], "using [secret-guard: github-token redacted]\nok");
+            assert_eq!(output["interrupted"], false);
+            assert!(note.contains("1 secret"));
+        }
+        other => panic!("expected redact, got {other:?}"),
+    }
+    let clean = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": "ok"}});
+    assert_eq!(decide(&clean, policy(&[])), Decision::Allow);
+    let allowed = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": token()}});
+    assert_eq!(decide(&allowed, policy(&[fingerprint(b"salt", &token())])), Decision::Allow);
+}

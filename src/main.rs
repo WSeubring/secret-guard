@@ -3,6 +3,7 @@
 //! Modes:
 //!   secret-guard            hook mode: hook event JSON on stdin, exit 2 to block
 //!   secret-guard scan       scan raw text on stdin, print redacted findings, exit 1 if any
+//!   secret-guard redact     filter stdin to stdout, secrets replaced (streams line by line)
 //!   secret-guard corpus     JSONL on stdin ({"id", "event"}), JSONL out ({"id", "hits": [{"rule", "field", "context"}]});
 //!                           secrets are redacted here, so real data never leaves this process in clear
 //!   secret-guard eval       JSONL on stdin ({"id", "event"}), JSONL out ({"id", "rules", "secrets", "spans", "rejected"}); no allowlist
@@ -88,6 +89,13 @@ fn hook() -> ExitCode {
     match decide(&event, policy) {
         Decision::Allow => ExitCode::SUCCESS,
         Decision::Block(msg) => block(&msg),
+        Decision::Redact { output, note } => {
+            println!(
+                "{}",
+                json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output, "additionalContext": note}})
+            );
+            ExitCode::SUCCESS
+        }
         Decision::Steer(note) => {
             let name = event.get("hook_event_name").and_then(Value::as_str).unwrap_or("PreToolUse");
             println!("{}", json!({"hookSpecificOutput": {"hookEventName": name, "additionalContext": note}}));
@@ -133,6 +141,35 @@ fn eval() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Copy stdin to stdout line by line with secrets replaced, so command output can be filtered as it streams.
+fn redact_stream() -> ExitCode {
+    let stdout = io::stdout();
+    let mut out = io::LineWriter::new(stdout.lock());
+    let mut in_key = false;
+    for line in io::stdin().lock().split(b'\n') {
+        let Ok(line) = line else { break };
+        let text = String::from_utf8_lossy(&line);
+        if in_key {
+            if text.contains("-----END") {
+                in_key = false;
+                let _ = writeln!(out, "{text}");
+            }
+            continue;
+        }
+        if text.contains("PRIVATE KEY-----") && text.contains("-----BEGIN") && !text.contains("-----END") {
+            in_key = true;
+            let _ = writeln!(out, "{text}\n[secret-guard: private key redacted]");
+            continue;
+        }
+        let mut masked = text.to_string();
+        for f in scan_text(&text).iter().rev() {
+            masked.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
+        }
+        let _ = writeln!(out, "{masked}");
+    }
+    ExitCode::SUCCESS
+}
+
 fn corpus() -> ExitCode {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -155,6 +192,7 @@ fn main() -> ExitCode {
         Some("scan") => scan(),
         Some("eval") => eval(),
         Some("corpus") => corpus(),
+        Some("redact") => redact_stream(),
         _ => hook(),
     }
 }

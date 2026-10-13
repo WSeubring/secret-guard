@@ -85,9 +85,17 @@ Handling values without printing them is allowed: piping into a consumer
 readers are judged on what they would actually print: `grep APP_ENV .env` or
 `head -n 1 .env` passes when the matched lines hold no secret.
 
-**Not covered: output of commands that are not known to print secrets** (a script, app
-logs, an MCP reply, a fetched page). Hooks run before a tool or after it, so that output
-is already in the conversation by the time any hook could see it.
+**Any other tool output contains a secret** (a script, app logs, an MCP reply, a fetched
+page). The `PostToolUse` hook rewrites the result before the model sees it
+(`updatedToolOutput`), keeping its JSON shape and replacing each value:
+
+```
+GITHUB_TOKEN=[secret-guard: github-token redacted]
+```
+
+and tells the agent that values were redacted. The command itself has already run;
+only what reaches the model changes. `secret-guard redact` applies the same filter to a
+stream (`some-command | secret-guard redact`).
 
 ## Why not gitleaks
 
@@ -132,7 +140,8 @@ install -m 755 target/release/secret-guard ~/.local/bin/secret-guard
 
 ```json
 "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/.local/bin/secret-guard", "timeout": 5 }] }],
-"PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.local/bin/secret-guard", "timeout": 5 }] }]
+"PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.local/bin/secret-guard", "timeout": 5 }] }],
+"PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "~/.local/bin/secret-guard", "timeout": 5 }] }]
 ```
 
 ## Escape hatches

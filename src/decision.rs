@@ -1,7 +1,7 @@
 //! What the hook does with a Claude Code event: allow it, or block it with a message.
 
 use crate::shell::SecretFile;
-use crate::{raw_secret_output, referenced_files, scan_event, scan_text, Finding};
+use crate::{is_post_tool_use, raw_secret_output, referenced_files, scan_event, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use regex::Regex;
@@ -25,6 +25,8 @@ pub enum Decision {
     Steer(String),
     /// Exit 2 with this message on stderr.
     Block(String),
+    /// Replace the tool's result with this one (`PostToolUse` `updatedToolOutput`), and tell the model why.
+    Redact { output: Value, note: String },
 }
 
 pub fn fingerprint(salt: &[u8], secret: &str) -> String {
@@ -73,7 +75,7 @@ pub const UNSCANNED: &str = "secret-guard could not scan this call (internal err
 /// A scanner panic steers instead of blocking: only a found secret is worth stopping work for.
 /// `cat .env`, `kubectl get secret -o yaml`: a Bash command whose output would carry secret values.
 fn bash_exposure(event: &Value) -> Option<String> {
-    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+    if is_post_tool_use(event) || event.get("tool_name").and_then(Value::as_str) != Some("Bash") {
         return None;
     }
     let command = event.get("tool_input")?.get("command")?.as_str()?;
@@ -107,6 +109,18 @@ pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
         return Decision::Allow;
     }
     let policy = policy();
+    if is_post_tool_use(event) {
+        let mut output = event.get("tool_response").cloned().unwrap_or(Value::Null);
+        let n = redact_strings(&mut output, &|f| !policy.allowlist.contains(&fingerprint(&policy.salt, &f.secret)));
+        if n == 0 {
+            return Decision::Allow;
+        }
+        let note = format!(
+            "secret-guard replaced {n} secret value(s) in this tool output with [secret-guard: <rule> redacted]. \
+             Work with the redacted output; do not try to recover the values."
+        );
+        return Decision::Redact { output, note };
+    }
     let findings: Vec<(Finding, String)> = findings
         .into_iter()
         .map(|f| {
@@ -149,6 +163,22 @@ pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
         )
     };
     Decision::Block(msg)
+}
+
+/// Replace every secret in the strings of `v` (keeping its shape, so the tool's output schema still matches).
+fn redact_strings(v: &mut Value, keep: &dyn Fn(&Finding) -> bool) -> usize {
+    match v {
+        Value::String(s) => {
+            let found: Vec<Finding> = scan_text(s).into_iter().filter(|f| keep(f)).collect();
+            for f in found.iter().rev() {
+                s.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
+            }
+            found.len()
+        }
+        Value::Array(items) => items.iter_mut().map(|i| redact_strings(i, keep)).sum(),
+        Value::Object(map) => map.values_mut().map(|i| redact_strings(i, keep)).sum(),
+        _ => 0,
+    }
 }
 
 /// `width` chars either side of a finding, the secret masked, and long digit-bearing tokens nearby hidden too.

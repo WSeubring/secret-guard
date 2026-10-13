@@ -218,17 +218,23 @@ fn resolve(path: &str, cwd: &Path) -> PathBuf {
     cwd.join(path)
 }
 
-/// The strings of a hook event that get scanned: the prompt for UserPromptSubmit, every string in tool_input otherwise.
+/// The strings of a hook event that get scanned: the prompt for UserPromptSubmit, the tool_response for
+/// PostToolUse, every string in tool_input otherwise.
 pub fn event_fields(event: &Value) -> Vec<(String, &str)> {
     let mut items: Vec<(String, &str)> = Vec::new();
     if event.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit") {
         if let Some(p) = event.get("prompt").and_then(Value::as_str) {
             items.push(("prompt".into(), p));
         }
-    } else if let Some(input) = event.get("tool_input") {
+    } else if let Some(input) = event.get(if is_post_tool_use(event) { "tool_response" } else { "tool_input" }) {
         walk(input, String::new(), &mut items);
     }
     items
+}
+
+/// `PostToolUse` carries the tool's result, which the hook can replace before the model sees it.
+pub fn is_post_tool_use(event: &Value) -> bool {
+    event.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse")
 }
 
 /// Candidates in a hook event that were not reported, with the reason.

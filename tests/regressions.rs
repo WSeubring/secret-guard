@@ -74,6 +74,13 @@ fn smoke_positives_are_found() {
             ("prose-secret", format!("the password is {pw}")),
             ("generic-assignment", format!("DB_PASSWORD=\"{pw}\"")),
             ("cli-password-flag", format!("app login --password {pw}")),
+            ("cli-password-flag", format!("Connect-Azure -CertFilePassword {pw}")),
+            ("url-credentials", format!("redis://:{pw}@cache.prod.internal:6379/0")),
+            ("url-credentials", format!("mqtt+ws://{}:{pw}@broker.prod.internal:1883", rng.pick(6, "abcdefgh"))),
+            ("url-credentials", format!("smtps://ops@corp.example:{pw}@smtp.corp.example:465")),
+            ("url-credentials", format!("ftp://svc:{}@files.prod.internal/", rng.pick(10, "bcdfghjklmnpqrstvwxz"))),
+            ("securestring-literal", format!("$p = ConvertTo-SecureString '{}' -AsPlainText -Force", rng.pick(9, "bcdfghjklmnpqrstvwxz"))),
+            ("curl-setopt", format!("curl_easy_setopt(h, CURLOPT_USERPWD, \"svc:{pw}\");")),
         ];
         for (rule, text) in cases {
             let found = scan_text(&text);

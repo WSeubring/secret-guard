@@ -9,7 +9,7 @@ mod patterns;
 pub mod decision;
 pub use shell::raw_secret_output;
 mod rules;
-pub mod shell;
+mod shell;
 
 pub use classify::{classify, Context, Reason, Verdict};
 use rules::RULES;
@@ -169,11 +169,11 @@ fn walk<'a>(v: &'a Value, path: String, out: &mut Vec<(String, &'a str)>) {
     }
 }
 
-/// Tools whose `file_path` content reaches the model or leaves the machine.
-const FILE_TOOLS: &[&str] = &["Read", "Artifact"];
+/// Tools that send a file's content off the machine. `Read` is not here: its result is redacted (PostToolUse).
+const FILE_TOOLS: &[&str] = &["Artifact"];
 
-/// Files whose content the event sends to the model: `Read`/`Artifact` targets, and `@`-mentions in a prompt,
-/// which Claude Code attaches without a tool call. Paths may not exist; the caller skips those.
+/// Files whose content the event sends on unredacted: `Artifact` targets, and `@`-mentions in a prompt, which
+/// Claude Code attaches without a tool call. Paths may not exist; the caller skips those.
 pub fn referenced_files(event: &Value) -> Vec<PathBuf> {
     let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or(""));
     if event.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit") {

@@ -1,10 +1,11 @@
 # secret-guard
 
-Claude Code hook that blocks secrets in user prompts (`UserPromptSubmit`) and in
-every tool call (`PreToolUse`, all tools including MCP). It also scans the files that
-reach the model without passing through a tool input: the target of a `Read` or
-`Artifact` call, and files `@`-mentioned in a prompt (missing, binary and >2 MB files
-are skipped). Written in Rust for speed: a typical call costs about 1.2x-2x spawning an
+Claude Code hook that keeps secrets away from the model and the LLM provider. It blocks
+secrets in user prompts (`UserPromptSubmit`) and in every tool call (`PreToolUse`, all
+tools including MCP), and redacts them from every tool result (`PostToolUse`) before the
+model sees it. Files that leave without a tool result are scanned up front: files
+`@`-mentioned in a prompt and `Artifact` publishes (missing, binary and >2 MB files are
+skipped). Written in Rust for speed: a typical call costs about 1.2x-2x spawning an
 empty process (`eval/bench.py` prints both).
 
 ## What happens when
@@ -29,14 +30,14 @@ would attach the file without a tool call, so the prompt itself is blocked:
   - github-token in file /home/me/app/.env: 40 chars [fingerprint db10c472a441b73f]
 ```
 
-**The agent reads that file** (`Read`, or `Artifact` publishing it). The call is blocked
-before the file is loaded, and the agent is told how to proceed:
+**The agent reads that file** (`Read`, `cat .env`, `grep TOKEN .env`). The call runs and
+the result is redacted before the model sees it (see "Any tool output" below), so the
+agent can still work with the rest of the file. Publishing it with `Artifact` sends it
+off the machine, so that call is blocked:
 
 ```
-secret-guard: blocked Read call, the file it would load contains what looks like a secret:
+secret-guard: blocked Artifact call, the file it would load contains what looks like a secret:
   - github-token in file /home/me/app/.env: 40 chars [fingerprint db10c472a441b73f]
-Do not load files that hold secret values. Read only what you need without the values
-(e.g. `cut -d= -f1 .env` for the names), or ask the user. ...
 ```
 
 **The agent puts a secret in a tool call** (a Bash command, a file write, a Slack
@@ -67,9 +68,10 @@ value can be taken out; the replacement text is scanned as usual.
 allowed with a note to the model (`additionalContext`) to keep secret values out of tool
 calls and output. Only a found secret blocks.
 
-**A command would print secret values** (`cat .env`, `kubectl get secret -o yaml`,
-`op read …`, `gh auth token`, `env | grep TOKEN`, `echo $DB_PASSWORD`). Tool output lands
-in the conversation, so the call is blocked before it runs:
+**A command exists to print secret values** (`kubectl get secret -o yaml`, `op read …`,
+`gh auth token`, `env | grep TOKEN`, `echo $DB_PASSWORD`). Redaction only catches values
+the scanner recognises, and these print nothing else, so the call is blocked before it
+runs:
 
 ```
 secret-guard: blocked Bash call, `kubectl get secret -o yaml` would print secret values
@@ -81,12 +83,10 @@ redirect to a file, or print names only (`jq 'keys'`, `cut -d= -f1`, `grep -c`).
 Handling values without printing them is allowed: piping into a consumer
 (`| kubeseal`, `| docker login --password-stdin`, `| sha256sum`, any unknown command),
 `$(...)`, `> file`, names or counts only (`jq '.data | keys'`, `cut -d= -f1`,
-`awk -F= '{print $1}'`, `grep -c`), masking (`sed 's/=.*/=<set>/'`), and `sed -i`. File
-readers are judged on what they would actually print: `grep APP_ENV .env` or
-`head -n 1 .env` passes when the matched lines hold no secret.
+`awk -F= '{print $1}'`, `grep -c`), masking (`sed 's/=.*/=<set>/'`), and `sed -i`.
 
-**Any other tool output contains a secret** (a script, app logs, an MCP reply, a fetched
-page). The `PostToolUse` hook rewrites the result before the model sees it
+**Any tool output contains a secret** (a file read, a script, app logs, an MCP reply, a
+fetched page). The `PostToolUse` hook rewrites the result before the model sees it
 (`updatedToolOutput`), keeping its JSON shape and replacing each value:
 
 ```

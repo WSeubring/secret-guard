@@ -1,20 +1,11 @@
-//! Would a Bash command print secret values? Its output goes straight into the conversation.
+//! Would a Bash command dump secret values? Output is redacted on the way back (PostToolUse), but only the
+//! secrets the scanner recognises; commands that print nothing but secret values are blocked up front.
 //!
-//! A source (a file holding a secret, or a command that dumps secrets) is only a problem when its output
+//! A command that dumps secrets is only a problem when its output
 //! reaches the end of the pipeline through printers like `grep` or `jq`. A consumer (`kubeseal`, `wc`, any
 //! unknown command), a names-only filter (`jq keys`, `cut -d= -f1`), a redirect to a file, or a `$(...)`
 //! keeps the values out.
 
-use std::path::Path;
-
-/// A file holding secrets: its text, the 1-based lines with a secret, and the secret values.
-pub struct SecretFile {
-    pub text: String,
-    pub lines: Vec<usize>,
-    pub secrets: Vec<String>,
-}
-
-type Secrets<'a> = &'a dyn Fn(&Path) -> Option<SecretFile>;
 
 /// Commands that pass their input or file arguments through to their output.
 const PRINTERS: &[&str] = &[
@@ -26,23 +17,20 @@ const PRINTERS: &[&str] = &[
 const PREFIXES: &[&str] = &["sudo", "time", "nohup", "command", "exec", "builtin"];
 
 /// What the command would print, e.g. `kubectl get secret -o yaml` or `cat .env`, or `None` when nothing raw.
-pub fn raw_secret_output(command: &str, cwd: &Path, secrets: Secrets) -> Option<String> {
+pub fn raw_secret_output(command: &str) -> Option<String> {
     for statement in split_top(&strip_heredocs(command), &[";", "&&", "||", "\n", "&"]) {
         let stages: Vec<Vec<String>> = split_top(&statement, &["|"]).iter().map(|s| words(s)).collect();
-        if let Some(found) = pipeline(&stages, cwd, secrets) {
+        if let Some(found) = pipeline(&stages) {
             return Some(found);
         }
     }
     None
 }
 
-fn pipeline(stages: &[Vec<String>], cwd: &Path, secrets: Secrets) -> Option<String> {
+fn pipeline(stages: &[Vec<String>]) -> Option<String> {
     for (i, stage) in stages.iter().enumerate() {
         let cmd = command_words(stage);
-        let Some(source) = dump(cmd)
-            .or_else(|| read_secret_file(cmd, cwd, secrets))
-            .or_else(|| echoed_substitution(cmd, cwd, secrets))
-        else {
+        let Some(source) = dump(cmd).or_else(|| echoed_substitution(cmd)) else {
             continue;
         };
         let printed = !redirected(stage) && stages[i + 1..].iter().all(|s| passes_through(command_words(s)) && !redirected(s));
@@ -182,120 +170,14 @@ fn variables(arg: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `cat .env`, `grep TOKEN config.yaml`: a printer that would print a secret from a file.
-fn read_secret_file(cmd: &[String], cwd: &Path, secrets: Secrets) -> Option<String> {
-    let c = base(cmd.first()?);
-    if !PRINTERS.contains(&c) || c == "tee" || hides(cmd) {
-        return None;
-    }
-    cmd[1..].iter().filter(|a| !a.starts_with('-') && !a.contains(['$', '\u{1}'])).find_map(|a| {
-        let path = match a.strip_prefix("~/") {
-            Some(rest) => Path::new(&std::env::var_os("HOME")?).join(rest),
-            None => cwd.join(a),
-        };
-        if !path.is_file() {
-            return None;
-        }
-        let file = secrets(&path)?;
-        prints_secret(c, cmd, &file).then(|| format!("{c} {a}"))
-    })
-}
-
-/// The number after `-n`, `-n5`, `-5`, `--lines=5` (or `-c`, `--bytes=` for bytes).
-fn count_arg(cmd: &[String], short: &str, long: &str) -> Option<usize> {
-    cmd.iter().enumerate().find_map(|(i, w)| {
-        let v = if w == short { cmd.get(i + 1).map(String::as_str) } else { w.strip_prefix(short).or(w.strip_prefix(long)) };
-        v?.trim_start_matches('+').parse().ok()
-    })
-}
-
-fn prints_secret(c: &str, cmd: &[String], file: &SecretFile) -> bool {
-    let total = file.text.lines().count();
-    let line_start = |n: usize| file.text.lines().take(n - 1).map(|l| l.len() + 1).sum::<usize>();
-    match c {
-        "grep" | "egrep" | "fgrep" | "rg" => grep_prints(c, cmd, file),
-        "head" | "tail" => {
-            let bytes = count_arg(cmd, "-c", "--bytes=");
-            let lines = count_arg(cmd, "-n", "--lines=")
-                .or_else(|| cmd[1..].iter().find_map(|w| w.strip_prefix('-')?.parse().ok()))
-                .unwrap_or(10);
-            file.lines.iter().any(|&n| match (c, bytes) {
-                ("head", Some(b)) => line_start(n) < b,
-                ("tail", Some(b)) => line_start(n) + 1 + b > file.text.len(),
-                ("head", None) => n <= lines,
-                _ => n + lines > total,
-            })
-        }
-        "sed" if cmd.iter().any(|w| w == "-n") => cmd[1..].iter().filter(|w| !w.starts_with('-')).any(|script| {
-            let range = script.strip_suffix('p').map(|r| r.split(',').map(|x| x.parse::<usize>()).collect::<Vec<_>>());
-            match range.as_deref() {
-                Some([Ok(a)]) => file.lines.contains(a),
-                Some([Ok(a), Ok(b)]) => file.lines.iter().any(|n| (a..=b).contains(&n)),
-                _ => script.ends_with('p'),
-            }
-        }),
-        _ => true,
-    }
-}
-
-/// Evaluate the grep pattern on the lines around each secret; an unsupported pattern counts as printing.
-fn grep_prints(c: &str, cmd: &[String], file: &SecretFile) -> bool {
-    let mut flags = String::new();
-    let mut patterns = Vec::new();
-    let mut context = 0usize;
-    let mut i = 1;
-    while i < cmd.len() {
-        let w = &cmd[i];
-        if let Some(n) = ["-A", "-B", "-C"].iter().find_map(|f| w.strip_prefix(f)) {
-            let n = if n.is_empty() { i += 1; cmd.get(i).map_or("0", String::as_str) } else { n };
-            context = context.max(n.parse().unwrap_or(0));
-        } else if w == "-e" || w == "--regexp" {
-            i += 1;
-            patterns.extend(cmd.get(i).cloned());
-        } else if let Some(f) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-            flags.push_str(f);
-        } else if !w.starts_with("--") && patterns.is_empty() {
-            patterns.push(w.clone());
-        }
-        i += 1;
-    }
-    let extended = c == "egrep" || c == "rg" || flags.contains(['E', 'P']);
-    let mut joined = Vec::new();
-    for p in &patterns {
-        let p = if c == "fgrep" || flags.contains('F') {
-            regex::escape(p)
-        } else if extended {
-            p.clone()
-        } else {
-            p.replace("\\|", "|").replace("\\(", "(").replace("\\)", ")").replace("\\+", "+").replace("\\?", "?")
-        };
-        joined.push(format!("(?:{p})"));
-    }
-    let Ok(re) = regex::RegexBuilder::new(&joined.join("|")).case_insensitive(flags.contains('i')).build() else { return true };
-    let invert = flags.contains('v');
-    let only = flags.contains('o');
-    let lines: Vec<&str> = file.text.lines().collect();
-    file.lines.iter().any(|&n| {
-        let window = n.saturating_sub(context).max(1)..=(n + context).min(lines.len());
-        window.into_iter().any(|m| {
-            let line = lines[m - 1];
-            if only {
-                m == n && !invert && re.find_iter(line).any(|hit| file.secrets.iter().any(|s| hit.as_str().contains(s.as_str())))
-            } else {
-                re.is_match(line) != invert
-            }
-        })
-    })
-}
-
-/// `echo "$(cat .env)"`: a substitution whose output is printed.
-fn echoed_substitution(cmd: &[String], cwd: &Path, secrets: Secrets) -> Option<String> {
+/// `echo "$(op read …)"`: a substitution whose output is printed.
+fn echoed_substitution(cmd: &[String]) -> Option<String> {
     if !matches!(base(cmd.first()?), "echo" | "printf") {
         return None;
     }
     cmd[1..].iter().find_map(|a| {
         let inner = a.split_once("$(")?.1;
-        raw_secret_output(inner.rsplit_once(')').map_or(inner, |(body, _)| body), cwd, secrets)
+        raw_secret_output(inner.rsplit_once(')').map_or(inner, |(body, _)| body))
     })
 }
 

@@ -1,6 +1,5 @@
 //! What the hook does with a Claude Code event: allow it, or block it with a message.
 
-use crate::shell::SecretFile;
 use crate::{is_post_tool_use, raw_secret_output, referenced_files, scan_event, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -79,17 +78,7 @@ fn bash_exposure(event: &Value) -> Option<String> {
         return None;
     }
     let command = event.get("tool_input")?.get("command")?.as_str()?;
-    let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or(""));
-    raw_secret_output(command, cwd, &|p| {
-        let text = read_text(p)?;
-        let found = scan_text(&text);
-        if found.is_empty() {
-            return None;
-        }
-        let lines = found.iter().map(|f| text[..f.start].matches('\n').count() + 1).collect();
-        let secrets = found.into_iter().map(|f| f.secret).collect();
-        Some(SecretFile { text, lines, secrets })
-    })
+    raw_secret_output(command)
 }
 
 pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {

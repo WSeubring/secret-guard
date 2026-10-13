@@ -78,15 +78,17 @@ fn temp_dir(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn read_of_file_with_secret_blocks() {
+fn read_is_allowed_but_artifact_publish_of_secret_file_blocks() {
     let dir = temp_dir("read");
-    let read = |p: &str| json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": p}, "cwd": dir});
-    let msg = block(decide(&read(dir.join(".env").to_str().unwrap()), policy(&[])));
-    assert!(msg.contains("blocked Read call, the file it would load") && msg.contains("in file ") && msg.contains(".env"));
+    let env = dir.join(".env");
+    let call = |tool: &str, p: &str| json!({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {"file_path": p}, "cwd": dir});
+    assert_eq!(decide(&call("Read", env.to_str().unwrap()), policy(&[])), Decision::Allow);
+    let msg = block(decide(&call("Artifact", env.to_str().unwrap()), policy(&[])));
+    assert!(msg.contains("blocked Artifact call, the file it would load") && msg.contains(".env"));
     assert!(!msg.contains(&token()));
-    block(decide(&read(".env"), policy(&[])));
+    block(decide(&call("Artifact", ".env"), policy(&[])));
     for clean in ["clean.txt", "missing.txt", "blob.bin"] {
-        assert_eq!(decide(&read(clean), policy(&[])), Decision::Allow, "{clean}");
+        assert_eq!(decide(&call("Artifact", clean), policy(&[])), Decision::Allow, "{clean}");
     }
 }
 

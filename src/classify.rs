@@ -127,7 +127,7 @@ pub(crate) fn looks_placeholder(body: &str, generic: bool) -> bool {
     if PLACEHOLDER_WORDS.iter().any(|w| low.contains(w)) {
         return true;
     }
-    if generic {
+    if generic && !(low.len() >= 32 && HEX.is_match(&low)) {
         let plain = if low.len() <= 24 && !HEX.is_match(&low) { unleet(&low) } else { String::new() };
         if GENERIC_PLACEHOLDER_WORDS.iter().any(|w| low.contains(w) || plain.contains(w)) {
             return true;
@@ -384,12 +384,20 @@ fn random_shape(v: &str, low: &str, n: usize) -> bool {
         if WORDY.is_match(low) && ratio < 0.25 {
             return false;
         }
-        return n >= 12 && ratio >= 0.2 && ent >= 3.0;
+        let shifts = v.as_bytes().windows(2).filter(|w| w[0].is_ascii_digit() != w[1].is_ascii_digit()).count();
+        let interleaved = !separated && shifts >= 4 && !HEX.is_match(low.trim_start_matches("0x"));
+        return (n >= 12 && ratio >= 0.2 && ent >= 3.0) || (interleaved && ent >= 2.75);
     }
     if lower && upper && !digit {
         let uppers = v.chars().filter(|c| c.is_uppercase()).count() as f64 / n as f64;
         return (n >= 16 && !v.contains(['-', '_', '.']) && (0.3..=0.7).contains(&uppers) && ent >= 3.8)
             || (n >= 32 && ent >= 4.2);
+    }
+    if v.chars().all(|c| c.is_ascii_alphabetic()) {
+        let vowel = |c: char| "aeiouy".contains(c);
+        let vowels = low.chars().filter(|&c| vowel(c)).count();
+        let consonant_run = low.split(vowel).map(str::len).max().unwrap_or(0);
+        return n >= 16 && ent >= 3.5 && consonant_run >= 5 && vowels * 10 <= n * 3;
     }
     false
 }

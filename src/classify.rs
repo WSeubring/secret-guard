@@ -356,6 +356,11 @@ fn classify_at(v: &str, quoted: bool, min_len: usize, depth: u8) -> Result<(), R
     reject(!random_shape(v, &low, n), Reason::NotRandom)
 }
 
+/// Longest stretch without a vowel: random letters often reach 5, words rarely do.
+pub(crate) fn consonant_run(s: &str) -> usize {
+    s.split(|c| "aeiouyAEIOUY".contains(c)).map(str::len).max().unwrap_or(0)
+}
+
 /// Character-class mix and entropy of a value that passed every structural check.
 fn random_shape(v: &str, low: &str, n: usize) -> bool {
     let lower = v.chars().any(|c| c.is_lowercase());
@@ -396,10 +401,8 @@ fn random_shape(v: &str, low: &str, n: usize) -> bool {
             || (n >= 32 && ent >= 4.2);
     }
     if v.chars().all(|c| c.is_ascii_alphabetic()) {
-        let vowel = |c: char| "aeiouy".contains(c);
-        let vowels = low.chars().filter(|&c| vowel(c)).count();
-        let consonant_run = low.split(vowel).map(str::len).max().unwrap_or(0);
-        return n >= 16 && ent >= 3.5 && consonant_run >= 5 && vowels * 10 <= n * 3;
+        let vowels = low.chars().filter(|&c| "aeiouy".contains(c)).count();
+        return n >= 16 && ent >= 3.5 && consonant_run(low) >= 5 && vowels * 10 <= n * 3;
     }
     false
 }

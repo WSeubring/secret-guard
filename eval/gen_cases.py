@@ -116,7 +116,7 @@ TOKENS = {
     "grafana-api-key": lambda: b64(json.dumps({"k": rnd(32), "n": "ci", "id": R.randint(1, 99)}, separators=(",", ":"))),
     "nkey-seed": lambda: "S" + R.choice("ANOU") + rnd(56, string.ascii_uppercase + "234567"),
     "paseto-token": lambda: f"v{R.randint(1, 4)}.{R.choice(['local', 'public'])}.{rnd(R.randint(100, 200), URLSAFE)}",
-    "paserk-key": lambda: f"k{R.randint(1, 4)}.{R.choice(['local', 'secret', 'secret-pw'])}.{rnd(R.choice([43, 86, 150]), URLSAFE)}",
+    "paserk-key": lambda: f"k{R.randint(1, 4)}.{R.choice(['local', 'secret'])}.{rnd(R.choice([43, 86, 150]), URLSAFE)}",
     "jwk-private-key": lambda: json.dumps({"kty": "EC", "crv": "P-256", "x": rnd(43, URLSAFE), "y": rnd(43, URLSAFE), "d": rnd(43, URLSAFE)}, separators=(",", ":")),
     "jwt": jwt,
     "discord-webhook": lambda: f"https://discord.com/api/webhooks/{R.randint(10**17, 10**18)}/{rnd(68, URLSAFE)}",
@@ -322,6 +322,7 @@ CLEAN = [
     ("public", lambda: f"\"publishableKey\": \"pk_live_{rnd(24)}\""),
     ("public", lambda: json.dumps({"keys": [{"kty": "RSA", "kid": rnd(43, URLSAFE), "use": "sig", "e": "AQAB", "n": rnd(342, URLSAFE)}, {"kty": "EC", "crv": "P-256", "x": rnd(43, URLSAFE), "y": rnd(43, URLSAFE)}]}, indent=2)),
     ("public", lambda: f"paserk: k{R.randint(1, 4)}.public.{rnd(43, URLSAFE)}\nid: k4.lid.{rnd(44, URLSAFE)}"),
+    ("public", lambda: f"sealed: k4.seal.{rnd(100, URLSAFE)}\nwrapped: k4.secret-pw.{rnd(120, URLSAFE)}"),
     ("public", lambda: f"nats: U{rnd(55, string.ascii_uppercase + '234567')}"),
     ("hash", lambda: f"restore cache node-modules-cache-key-{sha(32)}"),
     # code handling secrets

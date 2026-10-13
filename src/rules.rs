@@ -1,6 +1,6 @@
 //! The rule table: each rule is a prefiltered regex plus a check that confirms the match.
 
-use crate::classify::{b64decode_loose, entropy, fake_token, percent_decode, printable, secret_value, Context, Reason};
+use crate::classify::{b64decode_loose, consonant_run, entropy, fake_token, percent_decode, printable, secret_value, Context, Reason};
 use crate::{ascii_regex, bytes_regex};
 use regex_automata::dfa::{dense::DFA, Automaton};
 use regex_automata::Input;
@@ -202,7 +202,7 @@ const PREFIX_RULES: &[(&str, &[&str], &str)] = &[
     ("grafana-api-key", &["eyJrIjoi"], r"(?P<body>eyJrIjoi[A-Za-z0-9+/_-]{30,}={0,2})"),
     ("nkey-seed", &["SA", "SC", "SN", "SO", "SU", "SX"], r"(?P<body>S[ACNOUX][A-Z2-7]{56})"),
     ("paseto-token", &[".local.", ".public."], r"(?P<body>v[1-4]\.(?:local|public)\.[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)?)"),
-    ("paserk-key", &[".local", ".secret", ".seal."], r"(?P<body>k[1-4]\.(?:local|secret|local-pw|secret-pw|seal|local-wrap\.pie|secret-wrap\.pie)\.[A-Za-z0-9_-]{40,})"),
+    ("paserk-key", &[".local.", ".secret."], r"(?P<body>k[1-4]\.(?:local|secret)\.[A-Za-z0-9_-]{40,})"),
     ("jwk-private-key", &["kty"], r#"(?:^|[{,\s])\\?["']?(?:d|p|q|dp|dq|qi|k)\\?["']?\s*:\s*\\?["'](?P<body>[A-Za-z0-9_-]{22,})"#),
 ];
 
@@ -474,7 +474,7 @@ impl Check {
 fn unpronounceable(v: &str) -> bool {
     v.len() >= 8
         && v.bytes().all(|b| b.is_ascii_lowercase())
-        && v.split(|c| "aeiouy".contains(c)).any(|run| run.len() >= 5)
+        && consonant_run(v) >= 5
 }
 
 /// Credentials for a service on this machine (`http://127.0.0.1:7906/auth?token=…`) are not worth blocking.

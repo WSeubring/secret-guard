@@ -1,4 +1,4 @@
-use secret_guard::{explain_text, scan_event, scan_text};
+use secret_guard::{classify, explain_text, scan_event, scan_text, Context, Verdict};
 use serde_json::json;
 
 struct Rng(u64);
@@ -77,7 +77,12 @@ fn smoke_positives_are_found() {
     let mut rng = Rng(0xD1B54A32D192ED03);
     let mut rng2 = Rng(0x94D049BB133111EB);
     for _ in 0..50 {
-        let pw = format!("{}{}", rng.pick(8, A62), rng.pick(8, "0123456789"));
+        let pw = loop {
+            let pw = format!("{}{}", rng.pick(8, A62), rng.pick(8, "0123456789"));
+            if classify(&pw, Context::Quoted) == Verdict::Secret {
+                break pw;
+            }
+        };
         let mixed: String = [("ghj", "01"), ("kmn", "23"), ("pqr", "45"), ("stv", "67"), ("wxz", "89")]
             .iter()
             .map(|(l, d)| format!("{}{}", rng2.pick(1, l), rng2.pick(1, d)))

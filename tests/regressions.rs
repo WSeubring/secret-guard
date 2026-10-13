@@ -75,9 +75,20 @@ fn clean_regressions_stay_clean() {
 #[test]
 fn smoke_positives_are_found() {
     let mut rng = Rng(0xD1B54A32D192ED03);
+    let mut rng2 = Rng(0x94D049BB133111EB);
     for _ in 0..50 {
         let pw = format!("{}{}", rng.pick(8, A62), rng.pick(8, "0123456789"));
+        let mixed: String = [("ghj", "01"), ("kmn", "23"), ("pqr", "45"), ("stv", "67"), ("wxz", "89")]
+            .iter()
+            .map(|(l, d)| format!("{}{}", rng2.pick(1, l), rng2.pick(1, d)))
+            .collect();
+        let consonants = "qzbwkfxhrmtdvlgjpnsc";
+        let hex = "3a9f0c7e1b5d82643a9f0c7e1b5d8264";
+        let skip = rng2.pick(1, "0123456789").parse::<usize>().unwrap();
         let cases = [
+            ("generic-assignment", format!("JWT_SECRET={}{}", &consonants[skip..], &consonants[..skip])),
+            ("generic-assignment", format!("password: \"{mixed}\"")),
+            ("generic-assignment", format!("WEBHOOK_SECRET={}dead{}", &hex[skip..], &hex[..skip])),
             ("github-token", format!("echo {}{}", "ghp_", rng.pick(36, A62))),
             ("gitlab-token", format!("GITLAB={}{}", "glpat-", rng.pick(20, URLSAFE))),
             ("aws-access-key-id", format!("id {}{}", "AKIA", rng.pick(16, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"))),

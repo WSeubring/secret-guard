@@ -47,7 +47,6 @@ const REGEX_MARKERS: &[&str] = &[
     "\\s", "\\S", "\\d", "\\w", "\\b", ".*", ".+", "[^", "[a-z", "[A-Z", "[0-9", "(?",
 ];
 
-
 pub(crate) fn entropy(s: &str) -> f64 {
     let mut counts: HashMap<char, usize> = HashMap::new();
     let mut n = 0usize;
@@ -123,7 +122,7 @@ fn unleet(s: &str) -> String {
         .collect()
 }
 
-pub(crate) fn looks_placeholder(body: &str, generic: bool) -> bool {
+fn looks_placeholder(body: &str, generic: bool) -> bool {
     let low = body.to_lowercase();
     if PLACEHOLDER_WORDS.iter().any(|w| low.contains(w)) {
         return true;
@@ -302,22 +301,19 @@ pub enum Verdict {
 
 /// Does a free-standing value look like a real credential (vs code, reference, placeholder)?
 pub fn classify(value: &str, ctx: Context) -> Verdict {
-    let (quoted, min_len) = match ctx {
-        Context::Unquoted => (false, 8),
-        Context::Quoted => (true, 8),
-        Context::Decoded => (true, 6),
-    };
-    match classify_at(value, quoted, min_len, 0) {
+    match secret_value(value, ctx) {
         Ok(()) => Verdict::Secret,
         Err(r) => Verdict::NotSecret(r),
     }
 }
 
 pub(crate) fn secret_value(value: &str, ctx: Context) -> Result<(), Reason> {
-    match classify(value, ctx) {
-        Verdict::Secret => Ok(()),
-        Verdict::NotSecret(r) => Err(r),
-    }
+    let (quoted, min_len) = match ctx {
+        Context::Unquoted => (false, 8),
+        Context::Quoted => (true, 8),
+        Context::Decoded => (true, 6),
+    };
+    classify_at(value, quoted, min_len, 0)
 }
 
 fn classify_at(v: &str, quoted: bool, min_len: usize, depth: u8) -> Result<(), Reason> {

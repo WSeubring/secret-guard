@@ -25,8 +25,9 @@ import shutil
 import subprocess
 import tempfile
 
+import sg
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "release", "secret-guard")
 DATA = os.environ.get("CREDDATA_DIR") or os.path.join(ROOT, "eval", "out", "creddata")
 
 
@@ -39,19 +40,19 @@ def load_markup():
     return rows
 
 
+def prompt(text):
+    return {"hook_event_name": "UserPromptSubmit", "prompt": text}
+
+
 def ours(paths):
     """{path: set of flagged 1-based line numbers}"""
-    payload, texts = [], {}
-    for i, p in enumerate(paths):
+    texts = []
+    for p in paths:
         with open(os.path.join(DATA, p), "rb") as f:
-            raw = f.read()
-        text = raw.decode("utf-8", errors="replace")
-        texts[i] = text.encode()
-        payload.append(json.dumps({"id": i, "event": {"hook_event_name": "UserPromptSubmit", "prompt": text}}))
-    out = subprocess.run([BIN, "eval"], input="\n".join(payload) + "\n", capture_output=True, text=True, check=True).stdout
+            texts.append(f.read().decode("utf-8", errors="replace"))
     flagged = {}
-    for r in map(json.loads, out.splitlines()):
-        data = texts[r["id"]]
+    for r in sg.run("eval", [prompt(t) for t in texts]):
+        data = texts[r["id"]].encode()
         newlines = [i for i, b in enumerate(data) if b == 0x0A]
         lines = set()
         for start, end in r["spans"]:
@@ -122,11 +123,8 @@ def quick(markup, per, only):
         for top, xs in bucket.items():
             rng.shuffle(xs)
             items += [(label, top, text) for top, text in xs[:per]]
-    payload = "".join(json.dumps({"id": i, "event": {"hook_event_name": "UserPromptSubmit", "prompt": t}}) + "\n"
-                      for i, (_, _, t) in enumerate(items))
-    out = subprocess.run([BIN, "eval"], input=payload, capture_output=True, text=True, check=True).stdout
     c, per_cat, reasons = collections.Counter(), collections.defaultdict(collections.Counter), collections.Counter()
-    for r in map(json.loads, out.splitlines()):
+    for r in sg.run("eval", [prompt(t) for _, _, t in items]):
         label, top, _ = items[r["id"]]
         hit = bool(r["rules"])
         key = ("tp" if hit else "fn") if label else ("fp" if hit else "tn")

@@ -11,8 +11,9 @@ import subprocess
 import sys
 import time
 
+import sg
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.path.join(ROOT, "target", "release", "secret-guard")
 OUT = os.path.join(ROOT, "eval", "out")
 
 
@@ -39,10 +40,8 @@ def main():
         f.writelines(json.dumps(c) + "\n" for c in cases)
 
     t0 = time.perf_counter()
-    res = subprocess.run([BIN, "eval"], input="".join(json.dumps(c) + "\n" for c in cases),
-                         capture_output=True, text=True, check=True).stdout
+    results = {c["id"]: r for c, r in zip(cases, sg.run("eval", [c["event"] for c in cases]))}
     elapsed = time.perf_counter() - t0
-    results = {r["id"]: r for r in map(json.loads, res.splitlines())}
 
     stats = collections.defaultdict(lambda: collections.Counter())
     fps, fns = [], []

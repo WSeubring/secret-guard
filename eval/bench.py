@@ -13,6 +13,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_scan  # noqa: E402
+import sg  # noqa: E402
 
 
 def timed(cmd, data):
@@ -30,7 +31,7 @@ def main():
     events = events[: args.n]
 
     floor = sorted(timed(["/usr/bin/true"], b"") for _ in range(300))
-    ts = sorted(timed([corpus_scan.BIN], e) for e in events)
+    ts = sorted(timed([sg.BIN], e) for e in events)
     q = lambda xs, p: xs[min(len(xs) - 1, int(len(xs) * p))]
     print(f"spawn floor (/usr/bin/true)  p50 {q(floor, .5):.2f} ms")
     print(f"secret-guard, {len(ts)} real events  p50 {q(ts, .5):.2f}  p95 {q(ts, .95):.2f}  p99 {q(ts, .99):.2f}  max {ts[-1]:.2f} ms")

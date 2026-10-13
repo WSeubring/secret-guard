@@ -18,7 +18,6 @@ const KEY_EXCLUDE_WORDS: &[&str] = &[
     "fake", "mock", "test", "embed",
 ];
 
-
 /// Longest `-`/`_`/`.`-separated segment, so placeholder checks skip prefixes like `glpat-` and numeric ids.
 fn random_part(body: &str) -> &str {
     let longest = body.split(['-', '_', '.']).max_by_key(|s| s.len()).unwrap_or(body);
@@ -29,7 +28,7 @@ fn random_part(body: &str) -> &str {
     }
 }
 
-/// A provider token is fake when it is a documented example or `part` (its random section) is a placeholder.
+/// Lowercase words of a key name: `dbPassword` and `DB_PASSWORD` both give `[db, password]`.
 fn key_words(key: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut cur = String::new();
@@ -72,18 +71,12 @@ fn key_names_secret(words: &[String]) -> bool {
     last == "base" && n >= 3 && words[n - 2] == "key" && words[n - 3] == "secret"
 }
 
-/// Does a variable or key name, like `GITHUB_TOKEN`, name a credential?
+/// Does a variable or key name, like `GITHUB_TOKEN`, name a credential? `1Password` names the password manager.
 pub(crate) fn names_secret(name: &str) -> bool {
-    !key_excluded(name)
-}
-
-/// `1Password: <item id>` names the password manager, not a password.
-fn key_excluded(key: &str) -> bool {
-    let words = key_words(key);
+    let words = key_words(name);
     let product = words.len() >= 2 && words[words.len() - 2] == "1" && words[words.len() - 1] == "password";
-    product || !key_names_secret(&words) || words.iter().any(|w| KEY_EXCLUDE_WORDS.contains(&w.as_str()))
+    !product && key_names_secret(&words) && !words.iter().any(|w| KEY_EXCLUDE_WORDS.contains(&w.as_str()))
 }
-
 
 #[derive(Clone, Copy)]
 pub(crate) enum Check {
@@ -308,7 +301,6 @@ pub(crate) static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     rules
 });
 
-
 /// Every way the generic-assignment keyword can end, then the char the assignment regex requires next.
 fn key_needles() -> &'static [&'static str] {
     followed_by(
@@ -341,16 +333,22 @@ fn jwt_verdict(tok: &str) -> Result<(), Reason> {
     fake_token(tok, parts[2])
 }
 
-/// Base64 body of a PEM private key whose BEGIN line ends at `from`; the span covers the start of the body.
+/// Base64 body of a PEM private key whose BEGIN line ends at `from`; the span runs to the end of the body.
+/// Lines may be split by newlines or by literal `\n` escapes (a key inside a JSON string).
 fn pem_span(text: &str, from: usize) -> Span {
     let rest = &text[from..];
     let limit = rest.char_indices().nth(12000).map(|(i, _)| i).unwrap_or(rest.len());
     let rest = &rest[..limit];
-    let norm = rest.replace("\\r", "").replace("\\n", "\n");
     let mut body = String::new();
-    let mut headers = 0;
-    for line in norm.split('\n') {
-        let t = line.trim();
+    let (mut headers, mut pos, mut end) = (0, 0, 0);
+    while pos < rest.len() {
+        let line_len = match (rest[pos..].find('\n'), rest[pos..].find("\\n")) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b).unwrap_or(rest.len() - pos),
+        };
+        let (start, line) = (pos, &rest[pos..pos + line_len]);
+        pos += line_len + if rest[pos + line_len..].starts_with("\\n") { 2 } else { 1 };
+        let t = line.trim().trim_end_matches("\\r");
         if t.is_empty() {
             continue;
         }
@@ -363,13 +361,12 @@ fn pem_span(text: &str, from: usize) -> Span {
         }
         if t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')) {
             body.push_str(t);
+            end = start + line_len;
         } else {
             break;
         }
     }
-    let end = (from + 80).min(text.len());
-    let end = (end..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len());
-    Span { start: from, end, body }
+    Span { start: from, end: from + end, body }
 }
 
 fn key_material(body: &str) -> Result<(), Reason> {
@@ -464,7 +461,7 @@ impl Check {
             },
             Check::Assignment => {
                 let key = std::str::from_utf8(caps.name("key").unwrap().as_bytes()).unwrap_or("");
-                if key_excluded(key) {
+                if !names_secret(key) {
                     return Err(Reason::KeyNotSecret);
                 }
                 local(caps.get(0).unwrap().start())?;

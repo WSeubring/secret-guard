@@ -55,10 +55,6 @@ pub struct Rejection {
     pub field: String,
 }
 
-fn scan(text: &str, trace: Option<&mut Vec<Rejection>>) -> Vec<Finding> {
-    scan_at(text, trace, 0)
-}
-
 /// Runs of 24+ base64 chars (standard or URL-safe alphabet, optional padding).
 fn base64_runs(bytes: &[u8]) -> Vec<(usize, usize)> {
     let b64 = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'-' | b'_');
@@ -131,18 +127,19 @@ fn scan_at(text: &str, mut trace: Option<&mut Vec<Rejection>>, depth: u8) -> Vec
             }
         }
     }
+    out.sort_by_key(|f| f.start);
     out
 }
 
-/// Scan one string. Findings are non-overlapping; `field` is left empty.
+/// Scan one string. Findings are non-overlapping and in text order; `field` is left empty.
 pub fn scan_text(text: &str) -> Vec<Finding> {
-    scan(text, None)
+    scan_at(text, None, 0)
 }
 
 /// Candidates in one string that were not reported, with the reason. For triaging misses.
 pub fn explain_text(text: &str) -> Vec<Rejection> {
     let mut trace = Vec::new();
-    scan(text, Some(&mut trace));
+    scan_at(text, Some(&mut trace), 0);
     trace
 }
 

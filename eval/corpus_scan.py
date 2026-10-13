@@ -13,10 +13,10 @@ import glob
 import json
 import os
 import subprocess
-import sys
+
+import sg
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = os.environ.get("SG_BIN") or os.path.join(ROOT, "target", "release", "secret-guard")
 HOME = os.path.expanduser("~")
 
 
@@ -87,11 +87,9 @@ def main():
     gens = {"repos": repo_cases, "transcripts": transcript_cases}
     for src in args.sources:
         cases = list(gens[src]())
-        payload = "".join(json.dumps({"id": n, "event": ev}) + "\n" for n, (_, ev) in enumerate(cases))
-        out = subprocess.run([BIN, "corpus"], input=payload, capture_output=True, text=True, check=True).stdout
         hits = collections.defaultdict(list)
         total_bytes = sum(len(json.dumps(ev)) for _, ev in cases)
-        for r in map(json.loads, out.splitlines()):
+        for r in sg.run("corpus", [ev for _, ev in cases]):
             where, _ = cases[r["id"]]
             for h in r["hits"]:
                 hits[h["rule"]].append((where, f"{h['field']}: {h['context']}"))

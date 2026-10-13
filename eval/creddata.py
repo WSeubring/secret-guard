@@ -12,6 +12,7 @@ setup (once, ~15 GB of clones, ~1 GB of data):
   .venv/bin/python download_data.py --data_dir data --jobs 8
 
 usage: eval/creddata.py [--no-gitleaks]
+       eval/creddata.py --quick [--category Password] [--per 200]   # seconds: sampled single lines
 """
 import argparse
 import bisect
@@ -26,7 +27,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "target", "release", "secret-guard")
-DATA = os.path.join(ROOT, "eval", "out", "creddata")
+DATA = os.environ.get("CREDDATA_DIR") or os.path.join(ROOT, "eval", "out", "creddata")
 
 
 def load_markup():
@@ -100,13 +101,61 @@ def score(name, markup, flagged):
     return by_cat
 
 
+def quick(markup, per, only):
+    """Single labelled lines, up to `per` positives and `per` negatives per top-level category; misses by reason."""
+    import random
+    pos, neg = collections.defaultdict(list), collections.defaultdict(list)
+    for path, rows in sorted(markup.items()):
+        lines = None
+        for start, end, truth, category in rows:
+            top = category.split(":")[0]
+            if only and top != only:
+                continue
+            if lines is None:
+                with open(os.path.join(DATA, path), "rb") as f:
+                    lines = f.read().decode("utf-8", errors="replace").split("\n")
+            item = (top, "\n".join(lines[start - 1:end]))
+            (pos if truth == "T" else neg)[top].append(item)
+    rng = random.Random(1)
+    items = []
+    for bucket, label in ((pos, True), (neg, False)):
+        for top, xs in bucket.items():
+            rng.shuffle(xs)
+            items += [(label, top, text) for top, text in xs[:per]]
+    payload = "".join(json.dumps({"id": i, "event": {"hook_event_name": "UserPromptSubmit", "prompt": t}}) + "\n"
+                      for i, (_, _, t) in enumerate(items))
+    out = subprocess.run([BIN, "eval"], input=payload, capture_output=True, text=True, check=True).stdout
+    c, per_cat, reasons = collections.Counter(), collections.defaultdict(collections.Counter), collections.Counter()
+    for r in map(json.loads, out.splitlines()):
+        label, top, _ = items[r["id"]]
+        hit = bool(r["rules"])
+        key = ("tp" if hit else "fn") if label else ("fp" if hit else "tn")
+        c[key] += 1
+        per_cat[top][key] += 1
+        if label and not hit:
+            reasons.update((top, x) for x in (r["rejected"] or ["no-candidate"]))
+    tp, fp, fn = c["tp"], c["fp"], c["fn"]
+    print(f"quick: {len(items)} lines  TP {tp}  FP {fp}  FN {fn}  TN {c['tn']}  "
+          f"precision {tp / max(1, tp + fp):.3f}  recall {tp / max(1, tp + fn):.3f}")
+    for top, s in sorted(per_cat.items(), key=lambda kv: -(kv[1]["tp"] + kv[1]["fn"])):
+        if s["tp"] + s["fn"] + s["fp"]:
+            print(f"  {top:28} recall {s['tp']}/{s['tp'] + s['fn']}  FP {s['fp']}/{s['fp'] + s['tn']}")
+    print("top miss reasons:", reasons.most_common(12))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-gitleaks", action="store_true")
+    ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--per", type=int, default=150)
+    ap.add_argument("--category")
     args = ap.parse_args()
     markup = load_markup()
     paths = sorted(p for p in markup if os.path.isfile(os.path.join(DATA, p)))
     markup = {p: markup[p] for p in paths}
+    if args.quick:
+        quick(markup, args.per, args.category)
+        return
     print(f"CredData: {len(paths)} files, {sum(len(r) for r in markup.values())} labelled lines, "
           f"{sum(1 for r in markup.values() for x in r if x[2] == 'T')} credentials\n")
     by_cat = score("secret-guard", markup, ours(paths))

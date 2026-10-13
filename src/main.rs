@@ -13,8 +13,9 @@
 //! SECRET_GUARD_DISABLE=1, or a file named `disabled` in the config dir, disables it. False positives go in
 //! ~/.config/secret-guard/allowlist.txt as one fingerprint per line.
 
-use secret_guard::decision::{decide, redact, redacted_context, Decision, Policy};
-use secret_guard::{event_fields, explain_event, scan_event, scan_text};
+use secret_guard::decision::{redact, redacted_context, Policy};
+use secret_guard::hook::{respond, Event};
+use secret_guard::{explain_event, mask, scan_event, scan_text};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -64,11 +65,6 @@ fn log_error(msg: &str) {
     }
 }
 
-fn block(msg: &str) -> ExitCode {
-    eprintln!("{msg}");
-    ExitCode::from(2)
-}
-
 fn hook() -> ExitCode {
     if std::env::var("SECRET_GUARD_DISABLE").as_deref() == Ok("1") || config_dir().join("disabled").exists() {
         return ExitCode::SUCCESS;
@@ -86,22 +82,14 @@ fn hook() -> ExitCode {
         }
     };
     std::panic::set_hook(Box::new(|info| log_error(&format!("panic: {info}"))));
-    match decide(&event, policy) {
-        Decision::Allow => ExitCode::SUCCESS,
-        Decision::Block(msg) => block(&msg),
-        Decision::Redact { output, note } => {
-            println!(
-                "{}",
-                json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": output, "additionalContext": note}})
-            );
-            ExitCode::SUCCESS
-        }
-        Decision::Steer(note) => {
-            let name = event.get("hook_event_name").and_then(Value::as_str).unwrap_or("PreToolUse");
-            println!("{}", json!({"hookSpecificOutput": {"hookEventName": name, "additionalContext": note}}));
-            ExitCode::SUCCESS
-        }
+    let reply = respond(&event, policy);
+    if let Some(msg) = reply.stderr {
+        eprintln!("{msg}");
     }
+    if let Some(out) = reply.stdout {
+        println!("{out}");
+    }
+    ExitCode::from(reply.code)
 }
 
 fn scan() -> ExitCode {
@@ -161,11 +149,7 @@ fn redact_stream() -> ExitCode {
             let _ = writeln!(out, "{text}\n[secret-guard: private key redacted]");
             continue;
         }
-        let mut masked = text.to_string();
-        for f in scan_text(&text).iter().rev() {
-            masked.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
-        }
-        let _ = writeln!(out, "{masked}");
+        let _ = writeln!(out, "{}", mask(&text, &scan_text(&text)));
     }
     ExitCode::SUCCESS
 }
@@ -177,7 +161,7 @@ fn corpus() -> ExitCode {
         let Ok(line) = line else { break };
         let Ok(case) = serde_json::from_str::<Value>(&line) else { continue };
         let mut hits = Vec::new();
-        for (field, text) in event_fields(&case["event"]) {
+        for (field, text) in Event::parse(&case["event"]).fields() {
             for f in scan_text(text) {
                 hits.push(json!({"rule": f.rule, "field": field, "context": redacted_context(text, &f, 50)}));
             }

@@ -5,27 +5,26 @@
 //! reference, identifier, template or hash.
 
 mod classify;
-mod patterns;
 pub mod decision;
-pub use shell::raw_secret_output;
+pub mod hook;
+mod patterns;
 mod rules;
 mod shell;
 
 pub use classify::{classify, Context, Reason, Verdict};
+pub use hook::{explain_event, scan_event};
+pub use shell::raw_secret_output;
 use rules::RULES;
 
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
-use serde_json::Value;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 /// Unicode-free regexes compile in a fraction of the time, and every process compiles from scratch.
-fn ascii_regex(p: &str) -> Regex {
+pub(crate) fn ascii_regex(p: &str) -> Regex {
     regex::RegexBuilder::new(p).unicode(false).build().unwrap()
 }
 
-fn bytes_regex(p: &str) -> BytesRegex {
+pub(crate) fn bytes_regex(p: &str) -> BytesRegex {
     regex::bytes::RegexBuilder::new(p).unicode(false).build().unwrap()
 }
 
@@ -37,8 +36,6 @@ pub struct Finding {
     pub end: usize,
     pub field: String,
 }
-
-const SKIP_FIELDS: &[&str] = &["old_string"];
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -148,115 +145,11 @@ pub fn explain_text(text: &str) -> Vec<Rejection> {
     trace
 }
 
-fn walk<'a>(v: &'a Value, path: String, out: &mut Vec<(String, &'a str)>) {
-    match v {
-        Value::String(s) => out.push((path, s)),
-        Value::Object(map) => {
-            for (k, v) in map {
-                if SKIP_FIELDS.contains(&k.as_str()) {
-                    continue;
-                }
-                let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-                walk(v, p, out);
-            }
-        }
-        Value::Array(items) => {
-            for (i, v) in items.iter().enumerate() {
-                walk(v, format!("{path}[{i}]"), out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Tools that send a file's content off the machine. `Read` is not here: its result is redacted (PostToolUse).
-const FILE_TOOLS: &[&str] = &["Artifact"];
-
-/// Files whose content the event sends on unredacted: `Artifact` targets, and `@`-mentions in a prompt, which
-/// Claude Code attaches without a tool call. Paths may not exist; the caller skips those.
-pub fn referenced_files(event: &Value) -> Vec<PathBuf> {
-    let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or(""));
-    if event.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit") {
-        let prompt = event.get("prompt").and_then(Value::as_str).unwrap_or("");
-        return mentions(prompt).into_iter().map(|m| resolve(&m, cwd)).collect();
-    }
-    let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    if !FILE_TOOLS.contains(&tool) {
-        return Vec::new();
-    }
-    let input = event.get("tool_input");
-    let single = input.and_then(|i| i.get("file_path")).and_then(Value::as_str);
-    let many = input.and_then(|i| i.get("file_paths")).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-    single.into_iter().chain(many).map(|p| resolve(p, cwd)).collect()
-}
-
-/// `@path`, `@"path with spaces"`, `@path#L10-20`; trailing punctuation is tried both kept and dropped.
-fn mentions(prompt: &str) -> Vec<String> {
-    static MENTION: LazyLock<BytesRegex> = LazyLock::new(|| bytes_regex(r#"(?:^|\s)@(?:"([^"]+)"|(\S+))"#));
-    static LINES: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"#L\d+(?:-\d+)?$"));
-    let mut out = Vec::new();
-    if !prompt.contains('@') {
-        return out;
-    }
-    for c in MENTION.captures_iter(prompt.as_bytes()) {
-        let raw = c.get(1).or(c.get(2)).map_or("".into(), |m| String::from_utf8_lossy(m.as_bytes()));
-        let trimmed = raw.trim_end_matches([',', '.', ';', ':', '!', '?', ')']);
-        for candidate in [trimmed, &*raw] {
-            out.push(LINES.replace(candidate, "").into_owned());
-        }
-        out.dedup();
-    }
-    out
-}
-
-fn resolve(path: &str, cwd: &Path) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return Path::new(&home).join(rest);
-        }
-    }
-    cwd.join(path)
-}
-
-/// The strings of a hook event that get scanned: the prompt for UserPromptSubmit, the tool_response for
-/// PostToolUse, every string in tool_input otherwise.
-pub fn event_fields(event: &Value) -> Vec<(String, &str)> {
-    let mut items: Vec<(String, &str)> = Vec::new();
-    if event.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit") {
-        if let Some(p) = event.get("prompt").and_then(Value::as_str) {
-            items.push(("prompt".into(), p));
-        }
-    } else if let Some(input) = event.get(if is_post_tool_use(event) { "tool_response" } else { "tool_input" }) {
-        walk(input, String::new(), &mut items);
-    }
-    items
-}
-
-/// `PostToolUse` carries the tool's result, which the hook can replace before the model sees it.
-pub fn is_post_tool_use(event: &Value) -> bool {
-    event.get("hook_event_name").and_then(Value::as_str) == Some("PostToolUse")
-}
-
-/// Candidates in a hook event that were not reported, with the reason.
-pub fn explain_event(event: &Value) -> Vec<Rejection> {
-    let mut out = Vec::new();
-    for (field, text) in event_fields(event) {
-        for mut r in explain_text(text) {
-            r.field = field.clone();
-            out.push(r);
-        }
-    }
-    out
-}
-
-/// Scan a Claude Code hook event: the prompt for UserPromptSubmit, every string in tool_input otherwise.
-pub fn scan_event(event: &Value) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for (field, text) in event_fields(event) {
-        for mut f in scan_text(text) {
-            f.field = field.clone();
-            out.push(f);
-        }
+/// `text` with each finding's span replaced by `[secret-guard: <rule> redacted]`.
+pub fn mask(text: &str, findings: &[Finding]) -> String {
+    let mut out = text.to_string();
+    for f in findings.iter().rev() {
+        out.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
     }
     out
 }

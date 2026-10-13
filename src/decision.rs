@@ -1,6 +1,7 @@
 //! What the hook does with a Claude Code event: allow it, or block it with a message.
 
-use crate::{is_post_tool_use, raw_secret_output, referenced_files, scan_event, scan_text, Finding};
+use crate::hook::{scan_event, Event};
+use crate::{mask, raw_secret_output, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use regex::Regex;
@@ -15,6 +16,13 @@ pub struct Policy {
     pub allowlist: HashSet<String>,
     /// Shown to the user so they know where to add a fingerprint.
     pub allowlist_path: String,
+}
+
+impl Policy {
+    /// Allowlisted fingerprints are false positives the user has accepted.
+    pub fn reports(&self, f: &Finding) -> bool {
+        !self.allowlist.contains(&fingerprint(&self.salt, &f.secret))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -56,7 +64,7 @@ fn read_text(path: &Path) -> Option<String> {
 
 fn scan_all(event: &Value) -> Vec<Finding> {
     let mut findings = scan_event(event);
-    for path in referenced_files(event) {
+    for path in Event::parse(event).files() {
         let Some(text) = read_text(&path) else { continue };
         for mut f in scan_text(&text) {
             f.field = format!("file {}", path.display());
@@ -71,16 +79,13 @@ pub const UNSCANNED: &str = "secret-guard could not scan this call (internal err
     Do not put secret values in tool calls or print them in output; reference them indirectly (env var, file, \
     secret manager).";
 
-/// A scanner panic steers instead of blocking: only a found secret is worth stopping work for.
-/// `cat .env`, `kubectl get secret -o yaml`: a Bash command whose output would carry secret values.
+/// `kubectl get secret -o yaml`, `op read`: a Bash command whose output would be secret values.
 fn bash_exposure(event: &Value) -> Option<String> {
-    if is_post_tool_use(event) || event.get("tool_name").and_then(Value::as_str) != Some("Bash") {
-        return None;
-    }
-    let command = event.get("tool_input")?.get("command")?.as_str()?;
-    raw_secret_output(command)
+    let Event::PreTool { tool: "Bash", input: Some(input), .. } = Event::parse(event) else { return None };
+    raw_secret_output(input.get("command")?.as_str()?)
 }
 
+/// A scanner panic steers instead of blocking: only a found secret is worth stopping work for.
 pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
     let Ok((findings, exposure)) = std::panic::catch_unwind(|| (scan_all(event), bash_exposure(event))) else {
         return Decision::Steer(UNSCANNED.into());
@@ -98,9 +103,10 @@ pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
         return Decision::Allow;
     }
     let policy = policy();
-    if is_post_tool_use(event) {
-        let mut output = event.get("tool_response").cloned().unwrap_or(Value::Null);
-        let n = redact_strings(&mut output, &|f| !policy.allowlist.contains(&fingerprint(&policy.salt, &f.secret)));
+    let event = Event::parse(event);
+    if let Event::PostTool { response } = event {
+        let mut output = response.cloned().unwrap_or(Value::Null);
+        let n = redact_strings(&mut output, &policy);
         if n == 0 {
             return Decision::Allow;
         }
@@ -110,62 +116,60 @@ pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
         );
         return Decision::Redact { output, note };
     }
-    let findings: Vec<(Finding, String)> = findings
-        .into_iter()
-        .map(|f| {
-            let fp = fingerprint(&policy.salt, &f.secret);
-            (f, fp)
-        })
-        .filter(|(_, fp)| !policy.allowlist.contains(fp))
-        .collect();
+    let findings: Vec<Finding> = findings.into_iter().filter(|f| policy.reports(f)).collect();
     if findings.is_empty() {
         return Decision::Allow;
     }
-    let lines: Vec<String> = findings
-        .iter()
-        .map(|(f, fp)| format!("  - {} in {}: {} [fingerprint {fp}]", f.rule, f.field, redact(&f.secret)))
-        .collect();
-    let msg = if event.get("hook_event_name").and_then(Value::as_str) == Some("UserPromptSubmit") {
-        format!(
-            "secret-guard: prompt blocked, it contains what looks like a secret:\n{}\n\
-             Remove it (point to an env var or file instead) and resend.\n\
-             False positive? Add the fingerprint to {}.",
-            lines.join("\n"),
-            policy.allowlist_path
-        )
-    } else if findings.iter().any(|(f, _)| f.field.starts_with("file ")) {
-        format!(
-            "secret-guard: blocked {} call, the file it would load contains what looks like a secret:\n{}\n\
-             Do not load files that hold secret values. Read only what you need without the values \
-             (e.g. `cut -d= -f1 .env` for the names), or ask the user. If you believe this is a false positive, \
-             stop and ask the user.",
-            event.get("tool_name").and_then(Value::as_str).unwrap_or("tool"),
-            lines.join("\n")
-        )
-    } else {
-        format!(
-            "secret-guard: blocked {} call, its input contains what looks like a secret:\n{}\n\
-             Do not put secret values in tool calls. Reference them indirectly (env var, file, secret manager) \
-             so the value never appears in the call. If you believe this is a false positive, stop and ask the user.",
-            event.get("tool_name").and_then(Value::as_str).unwrap_or("tool"),
-            lines.join("\n")
-        )
-    };
-    Decision::Block(msg)
+    Decision::Block(block_message(&event, &findings, &policy))
 }
 
-/// Replace every secret in the strings of `v` (keeping its shape, so the tool's output schema still matches).
-fn redact_strings(v: &mut Value, keep: &dyn Fn(&Finding) -> bool) -> usize {
+fn block_message(event: &Event, findings: &[Finding], policy: &Policy) -> String {
+    let lines: Vec<String> = findings
+        .iter()
+        .map(|f| format!("  - {} in {}: {} [fingerprint {}]", f.rule, f.field, redact(&f.secret), fingerprint(&policy.salt, &f.secret)))
+        .collect();
+    let lines = lines.join("\n");
+    if let Event::Prompt { .. } = event {
+        return format!(
+            "secret-guard: prompt blocked, it contains what looks like a secret:\n{lines}\n\
+             Remove it (point to an env var or file instead) and resend.\n\
+             False positive? Add the fingerprint to {}.",
+            policy.allowlist_path
+        );
+    }
+    let tool = match event {
+        Event::PreTool { tool, .. } if !tool.is_empty() => tool,
+        _ => "tool",
+    };
+    let (what, advice) = if findings.iter().any(|f| f.field.starts_with("file ")) {
+        (
+            "the file it would load contains",
+            "Do not load files that hold secret values. Read only what you need without the values \
+             (e.g. `cut -d= -f1 .env` for the names), or ask the user.",
+        )
+    } else {
+        (
+            "its input contains",
+            "Do not put secret values in tool calls. Reference them indirectly (env var, file, secret manager) \
+             so the value never appears in the call.",
+        )
+    };
+    format!(
+        "secret-guard: blocked {tool} call, {what} what looks like a secret:\n{lines}\n{advice} \
+         If you believe this is a false positive, stop and ask the user."
+    )
+}
+
+/// Replace every reported secret in the strings of `v`, keeping its shape so the tool's output schema still matches.
+fn redact_strings(v: &mut Value, policy: &Policy) -> usize {
     match v {
         Value::String(s) => {
-            let found: Vec<Finding> = scan_text(s).into_iter().filter(|f| keep(f)).collect();
-            for f in found.iter().rev() {
-                s.replace_range(f.start..f.end, &format!("[secret-guard: {} redacted]", f.rule));
-            }
+            let found: Vec<Finding> = scan_text(s).into_iter().filter(|f| policy.reports(f)).collect();
+            *s = mask(s, &found);
             found.len()
         }
-        Value::Array(items) => items.iter_mut().map(|i| redact_strings(i, keep)).sum(),
-        Value::Object(map) => map.values_mut().map(|i| redact_strings(i, keep)).sum(),
+        Value::Array(items) => items.iter_mut().map(|i| redact_strings(i, policy)).sum(),
+        Value::Object(map) => map.values_mut().map(|i| redact_strings(i, policy)).sum(),
         _ => 0,
     }
 }

@@ -220,7 +220,7 @@ pub(crate) static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     add("azure-storage-key", &["AccountKey="], false, r"AccountKey=(?P<body>[A-Za-z0-9+/]{86}==)", Check::HighEntropy(4.5));
     add(
         "aws-secret-key", &["aws"], true,
-        r#"(?i)aws[\w.-]{0,20}?(?:secret|sk)[\w.-]{0,20}?["']?[ \t]*(?:[:=]|=>)[ \t]*["']?(?P<body>[A-Za-z0-9/+]{40})"#,
+        r#"(?i)aws[\w. -]{0,20}?(?:secret|sk)[\w. -]{0,20}?["']?(?:[ \t]*(?:[:=]|=>)[ \t]*|[ \t]+)["']?(?P<body>[A-Za-z0-9/+]{40})"#,
         Check::AwsSecret,
     );
     add(
@@ -433,8 +433,11 @@ impl Check {
                 while !text.is_char_boundary(from) {
                     from -= 1;
                 }
-                static SV: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"[?&]sv=\d{4}-\d\d-\d\d"));
-                if SV.is_match(&text[from..span.end]) { Ok(()) } else { Err(Reason::NoSasVersion) }
+                static SV: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"(?:[?&]|SharedAccessSignature=)sv=\d{4}-\d\d-\d\d"));
+                if !SV.is_match(&text[from..span.end]) {
+                    return Err(Reason::NoSasVersion);
+                }
+                fake_token(body, body)
             }
             Check::Strong | Check::Prose => local(span.start).and_then(|_| secret_value(body, ctx)),
             Check::BasicAuth => {
@@ -482,7 +485,7 @@ fn unpronounceable(v: &str) -> bool {
 /// Credentials for a service on this machine (`http://127.0.0.1:7906/auth?token=…`) are not worth blocking.
 fn in_local_url(text: &str, start: usize) -> bool {
     static LOCAL: LazyLock<Regex> = LazyLock::new(|| {
-        ascii_regex(r"^[a-z][a-z0-9+.-]*://(?:[A-Za-z0-9._~%!$&*+,;:=@-]*@)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/?#]|$)")
+        ascii_regex(r"^[a-z][a-z0-9+.-]*://(?:[\x21-\x2E\x30-\x7E]*@)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/?#]|$)")
     });
     let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '<' | '>' | '=');
     let Some(scheme) = text[..start].rfind("://") else { return false };

@@ -106,3 +106,40 @@ fn every_credential_keyword_is_detected() {
         }
     }
 }
+
+#[test]
+fn structured_key_formats() {
+    const B32: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const LOWER36: &str = "abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = Rng(0x2545F4914F6CDD1D);
+    for _ in 0..20 {
+        let cases = [
+            ("jwk-private-key", format!("{{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"{}\",\"d\":\"{}\"}}", rng.pick(43, URLSAFE), rng.pick(43, URLSAFE))),
+            ("jwk-private-key", format!("const key = {{\n  kty: 'oct',\n  k: '{}',\n}};", rng.pick(22, URLSAFE))),
+            ("paserk-key", format!("\"paserk\": \"k4.secret.{}\"", rng.pick(86, URLSAFE))),
+            ("paseto-token", format!("token: v4.public.{}", rng.pick(120, URLSAFE))),
+            ("nkey-seed", format!("seed = \"SU{}\"", rng.pick(56, B32))),
+            ("mailgun-key", format!("Mailgun::create('key-{}')", rng.pick(32, HEX))),
+            ("akamai-client-token", format!("client_token = akab-{}-{}", rng.pick(16, LOWER36), rng.pick(16, LOWER36))),
+            ("alibaba-access-key-id", format!("'access_id' => 'LTAI{}'", rng.pick(16, A62))),
+            ("wundergraph-key", format!("COSMO={}{}", "cosmo_", rng.pick(32, HEX))),
+            ("posthog-personal-key", format!("POSTHOG={}{}", "phx_", rng.pick(43, A62))),
+        ];
+        for (rule, text) in cases {
+            assert!(
+                scan_text(&text).iter().any(|f| f.rule == rule),
+                "{rule} missed in {text:?}, rejected: {:?}",
+                explain_text(&text).iter().map(|r| (r.rule, r.reason)).collect::<Vec<_>>()
+            );
+        }
+        let clean = [
+            format!("{{\"kty\":\"RSA\",\"kid\":\"{}\",\"e\":\"AQAB\",\"n\":\"{}\"}}", rng.pick(43, URLSAFE), rng.pick(342, URLSAFE)),
+            format!("paserk: k4.public.{}", rng.pick(43, URLSAFE)),
+            format!("nats: U{}", rng.pick(55, B32)),
+            format!("node-modules-cache-key-{}", rng.pick(32, HEX)),
+        ];
+        for text in clean {
+            assert!(scan_text(&text).is_empty(), "false positive in {text:?}");
+        }
+    }
+}

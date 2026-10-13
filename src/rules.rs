@@ -192,6 +192,16 @@ const PREFIX_RULES: &[(&str, &[&str], &str)] = &[
     ("plane-api-key", &["plane_api_"], r"(?P<body>plane_api_[a-f0-9]{32})"),
     ("doppler-token", &["dp."], r"(?P<body>dp\.(?:pt|st|sa|ct|scim|audit)\.[A-Za-z0-9]{40,})"),
     ("mailchimp-key", &["-us"], r"(?P<body>[0-9a-f]{32}-us\d{1,2})"),
+    ("mailgun-key", &["key-"], r"(?:^|[^\w.-])(?P<body>key-[0-9a-z]{32})"),
+    ("akamai-client-token", &["akab-"], r"(?P<body>akab-[0-9a-z]{16}-[0-9a-z]{16})"),
+    ("alibaba-access-key-id", &["LTAI"], r"(?P<body>LTAI[A-Za-z0-9]{12,20})"),
+    ("posthog-personal-key", &["phx_"], r"(?P<body>phx_[A-Za-z0-9_]{43})"),
+    ("wundergraph-key", &["cosmo_"], r"(?P<body>cosmo_[a-f0-9]{32})"),
+    ("grafana-api-key", &["eyJrIjoi"], r"(?P<body>eyJrIjoi[A-Za-z0-9+/_-]{30,}={0,2})"),
+    ("nkey-seed", &["SA", "SC", "SN", "SO", "SU", "SX"], r"(?P<body>S[ACNOUX][A-Z2-7]{56})"),
+    ("paseto-token", &[".local.", ".public."], r"(?P<body>v[1-4]\.(?:local|public)\.[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)?)"),
+    ("paserk-key", &[".local", ".secret", ".seal."], r"(?P<body>k[1-4]\.(?:local|secret|local-pw|secret-pw|seal|local-wrap\.pie|secret-wrap\.pie)\.[A-Za-z0-9_-]{40,})"),
+    ("jwk-private-key", &["kty"], r#"(?:^|[{,\s])\\?["']?(?:d|p|q|dp|dq|qi|k)\\?["']?\s*:\s*\\?["'](?P<body>[A-Za-z0-9_-]{22,})"#),
 ];
 
 /// Pattern of a rule that has a precompiled match gate (see `patterns.rs` and `build.rs`).

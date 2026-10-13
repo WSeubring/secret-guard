@@ -1,7 +1,7 @@
 //! What the hook does with a Claude Code event: allow, steer, block or redact it.
 
 use crate::hook::Event;
-use crate::{hidden, mask, raw_secret_output, scan_text, Finding};
+use crate::{hidden, mask, raw_secret_output, scan_field, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cell::LazyCell;
@@ -77,7 +77,7 @@ pub fn decide(event: &Event, policy: impl FnOnce() -> Policy) -> Decision {
 
 fn redact_output(response: Option<&Value>, policy: &Lazy<impl FnOnce() -> Policy>) -> Decision {
     let mut output = response.cloned().unwrap_or(Value::Null);
-    let n = redact_strings(&mut output, policy);
+    let n = redact_strings(&mut output, "", policy);
     if n == 0 {
         return Decision::Allow;
     }
@@ -157,15 +157,15 @@ fn block_message(event: &Event, findings: &[Finding], policy: &Policy) -> String
 }
 
 /// Replace every reported secret in the strings of `v`, keeping its shape so the tool's output schema still matches.
-fn redact_strings(v: &mut Value, policy: &Lazy<impl FnOnce() -> Policy>) -> usize {
+fn redact_strings(v: &mut Value, key: &str, policy: &Lazy<impl FnOnce() -> Policy>) -> usize {
     match v {
         Value::String(s) => {
-            let found: Vec<Finding> = scan_text(s).into_iter().filter(|f| policy.reports(f)).collect();
+            let found: Vec<Finding> = scan_field(key, s).into_iter().filter(|f| policy.reports(f)).collect();
             *s = mask(s, &found);
             found.len()
         }
-        Value::Array(items) => items.iter_mut().map(|i| redact_strings(i, policy)).sum(),
-        Value::Object(map) => map.values_mut().map(|i| redact_strings(i, policy)).sum(),
+        Value::Array(items) => items.iter_mut().map(|i| redact_strings(i, "", policy)).sum(),
+        Value::Object(map) => map.iter_mut().map(|(k, i)| redact_strings(i, k, policy)).sum(),
         _ => 0,
     }
 }

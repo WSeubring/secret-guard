@@ -1,7 +1,7 @@
 //! The Claude Code hook protocol: what an event carries, and the reply that goes back.
 
 use crate::decision::{decide, Decision, Policy};
-use crate::{ascii_regex, bytes_regex, explain_text, scan_text, Finding, Rejection};
+use crate::{ascii_regex, bytes_regex, explain_text, scan_field, Finding, Rejection};
 use regex::bytes::Regex as BytesRegex;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -52,11 +52,15 @@ impl<'a> Event<'a> {
         items
     }
 
-    /// Findings in `fields`, each naming its field.
+    /// Findings in `fields`, each naming its field; tool input values get their JSON key as context.
     pub fn scan(&self) -> Vec<Finding> {
         let mut out = Vec::new();
         for (field, text) in self.fields() {
-            for mut f in scan_text(text) {
+            let key = match self {
+                Event::Prompt { .. } => "",
+                _ => field.rsplit('.').next().filter(|k| !k.ends_with(']')).unwrap_or(""),
+            };
+            for mut f in scan_field(key, text) {
                 f.field = field.clone();
                 out.push(f);
             }
@@ -72,7 +76,15 @@ impl<'a> Event<'a> {
             Event::PreTool { tool, input: Some(input), cwd } if FILE_TOOLS.contains(tool) => {
                 let single = input.get("file_path").and_then(Value::as_str);
                 let many = input.get("file_paths").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-                single.into_iter().chain(many).map(|p| resolve(p, cwd)).collect()
+                let root = cwd.join(input.get("root").and_then(Value::as_str).unwrap_or(""));
+                let source = |v: &'a Value| v.as_str().or_else(|| v.get("from").and_then(Value::as_str)).or_else(|| v.get("path").and_then(Value::as_str));
+                let supporting: Vec<&str> = match input.get("files") {
+                    Some(Value::Object(map)) => map.values().filter(|v| v.get("artifact").is_none()).filter_map(source).collect(),
+                    Some(Value::Array(items)) => items.iter().filter_map(source).collect(),
+                    _ => Vec::new(),
+                };
+                let own = single.into_iter().chain(many).map(|p| resolve(p, cwd));
+                own.chain(supporting.into_iter().map(|p| resolve(p, &root))).collect()
             }
             _ => Vec::new(),
         }

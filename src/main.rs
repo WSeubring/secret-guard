@@ -160,11 +160,12 @@ fn corpus() -> ExitCode {
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(case) = serde_json::from_str::<Value>(&line) else { continue };
+        let event = Event::parse(&case["event"]);
+        let fields = event.fields();
         let mut hits = Vec::new();
-        for (field, text) in Event::parse(&case["event"]).fields() {
-            for f in scan_text(text) {
-                hits.push(json!({"rule": f.rule, "field": field, "context": redacted_context(text, &f, 50)}));
-            }
+        for f in event.scan() {
+            let text = fields.iter().find(|(name, _)| *name == f.field).map_or("", |(_, t)| *t);
+            hits.push(json!({"rule": f.rule, "field": f.field, "context": redacted_context(text, &f, 50)}));
         }
         let _ = writeln!(out, "{}", json!({"id": case["id"], "hits": hits}));
     }

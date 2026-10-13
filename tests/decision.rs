@@ -136,3 +136,79 @@ fn post_tool_use_redacts_output_and_keeps_its_shape() {
     let allowed = json!({"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": {"stdout": token()}});
     assert_eq!(decide(&allowed, policy(&[fingerprint(b"salt", &token())])), Decision::Allow);
 }
+
+fn password() -> String {
+    let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    (0..20)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            alphabet[(x % alphabet.len() as u64) as usize] as char
+        })
+        .collect()
+}
+
+#[test]
+fn bash_secret_dump_blocks() {
+    let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "gh auth token"}});
+    assert!(block(decide(&ev, policy(&[]))).contains("`gh auth token` would print secret values"));
+    let other = json!({"hook_event_name": "PreToolUse", "tool_name": "mcp__x__run", "tool_input": {"command": "gh auth token"}});
+    assert_eq!(decide(&other, policy(&[])), Decision::Allow);
+}
+
+#[test]
+fn block_message_without_tool_name_says_tool() {
+    let ev = json!({"hook_event_name": "PreToolUse", "tool_input": {"x": token()}});
+    assert!(block(decide(&ev, policy(&[]))).contains("blocked tool call"));
+}
+
+#[test]
+fn secrets_in_arrays_are_found() {
+    let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "mcp__x__y", "tool_input": {"args": ["a", token()]}});
+    assert!(block(decide(&ev, policy(&[]))).contains("github-token in args[1]"));
+    let post = json!({"hook_event_name": "PostToolUse", "tool_name": "mcp__x__y", "tool_response": [{"type": "text", "text": token()}]});
+    match decide(&post, policy(&[])) {
+        Decision::Redact { output, .. } => assert_eq!(output[0]["text"], "[secret-guard: github-token redacted]"),
+        other => panic!("expected redact, got {other:?}"),
+    }
+}
+
+#[test]
+fn json_keys_give_short_values_context() {
+    let pw = password();
+    let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "mcp__db__create_user", "tool_input": {"user": "app", "password": pw}});
+    assert!(block(decide(&ev, policy(&[]))).contains("in password"));
+    let post = json!({"hook_event_name": "PostToolUse", "tool_name": "mcp__db__get", "tool_response": {"user": "app", "password": pw}});
+    match decide(&post, policy(&[])) {
+        Decision::Redact { output, .. } => {
+            assert_eq!(output["password"], "[secret-guard: generic-assignment redacted]");
+            assert_eq!(output["user"], "app");
+        }
+        other => panic!("expected redact, got {other:?}"),
+    }
+    for key in ["pageToken", "next_page_token", "syncToken", "user", "description"] {
+        let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "mcp__x__list", "tool_input": {key: pw}});
+        assert_eq!(decide(&ev, policy(&[])), Decision::Allow, "{key}");
+    }
+}
+
+#[test]
+fn artifact_supporting_files_are_scanned() {
+    let dir = temp_dir("artifact-files");
+    let call = |files: serde_json::Value| {
+        json!({"hook_event_name": "PreToolUse", "tool_name": "Artifact", "tool_input": {"file_path": "clean.txt", "files": files}, "cwd": dir})
+    };
+    block(decide(&call(json!({"config.txt": ".env"})), policy(&[])));
+    block(decide(&call(json!({"config.txt": {"from": ".env"}})), policy(&[])));
+    block(decide(&call(json!([{"path": ".env"}])), policy(&[])));
+    assert_eq!(decide(&call(json!({"a.txt": "clean.txt", "b.css": {"artifact": "x", "path": ".env"}})), policy(&[])), Decision::Allow);
+}
+
+#[test]
+fn explain_event_names_rejected_candidates() {
+    let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "export API_KEY=${API_KEY}"}});
+    let rejected = secret_guard::explain_event(&ev);
+    assert!(rejected.iter().any(|r| r.field == "command"), "{rejected:?}");
+}

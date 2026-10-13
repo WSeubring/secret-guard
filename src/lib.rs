@@ -143,6 +143,22 @@ pub fn explain_text(text: &str) -> Vec<Rejection> {
     trace
 }
 
+/// A JSON string under `key`. A short single-word value is scanned as `key=value`, so `{"password": "..."}`
+/// gets the same context as `password=...`.
+pub fn scan_field(key: &str, value: &str) -> Vec<Finding> {
+    if key.is_empty() || value.len() > 200 || value.contains(char::is_whitespace) {
+        return scan_text(value);
+    }
+    let prefix = key.len() + 1;
+    let mut found = scan_text(&format!("{key}={value}"));
+    found.retain(|f| f.start >= prefix);
+    for f in &mut found {
+        f.start -= prefix;
+        f.end -= prefix;
+    }
+    found
+}
+
 /// `text` with each finding's span replaced by `[secret-guard: <rule> redacted]`.
 pub fn mask(text: &str, findings: &[Finding]) -> String {
     let mut out = text.to_string();

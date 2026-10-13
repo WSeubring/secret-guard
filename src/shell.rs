@@ -17,7 +17,10 @@ const PREFIXES: &[(&str, &[&str])] = &[
     ("sudo", &["-u", "-g", "-h", "-C", "-D", "-p", "-U"]),
     ("xargs", &["-a", "-I", "-n", "-P", "-d", "-E", "-L", "-s"]),
     ("env", &["-u", "-C", "-S"]),
-    ("time", &[]), ("nohup", &[]), ("command", &[]), ("exec", &[]), ("builtin", &[]),
+    ("timeout", &["-s", "-k", "--signal", "--kill-after"]),
+    ("nice", &["-n"]),
+    ("watch", &["-n", "--interval"]),
+    ("stdbuf", &[]), ("time", &[]), ("nohup", &[]), ("command", &[]), ("exec", &[]), ("builtin", &[]),
     ("if", &[]), ("then", &[]), ("elif", &[]), ("else", &[]), ("do", &[]), ("while", &[]), ("until", &[]), ("{", &[]), ("!", &[]),
 ];
 
@@ -59,8 +62,9 @@ fn command_words(stage: &[String]) -> &[String] {
             break;
         }
         i += 1;
-        while let Some(flag) = stage.get(i).filter(|f| f.starts_with('-')) {
-            i += if takes_value.contains(&flag.as_str()) { 2 } else { 1 };
+        i = after_flags(stage, i, takes_value);
+        if w == "timeout" {
+            i += 1;
         }
     }
     &stage[i.min(stage.len())..]
@@ -80,11 +84,9 @@ fn hides(cmd: &[String]) -> bool {
     let flags = || cmd[1..].iter().filter(|w| w.starts_with('-') && !w.starts_with("--"));
     match c {
         "grep" | "egrep" | "fgrep" | "rg" => {
-            let invert = flags().any(|f| f.contains('v'));
             let names_only: &[char] = if c == "rg" { &['c', 'l', 'q'] } else { &['c', 'l', 'L', 'q'] };
             flags().any(|f| f.contains(names_only))
                 || cmd.iter().any(|w| matches!(w.as_str(), "--count" | "--quiet" | "--files-with-matches"))
-                || invert && cmd[1..].iter().any(|w| !w.starts_with('-') && ["key", "token", "secret", "pass"].iter().any(|k| w.to_lowercase().contains(k)))
         }
         "sed" => {
             cmd.iter().any(|w| w == "-i" || w.starts_with("--in-place") || w.starts_with("-i."))
@@ -97,13 +99,29 @@ fn hides(cmd: &[String]) -> bool {
         "head" | "tail" => cmd.windows(2).any(|p| p[0] == "-c" && p[1].parse::<u32>().is_ok_and(|n| n <= 8))
             || cmd.iter().any(|w| w.strip_prefix("-c").and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| n <= 8)),
         "cut" => has_flag(cmd, "-f", "1") && has_flag(cmd, "-d", "="),
-        "jq" | "yq" => cmd[1..].iter().any(|w| {
-            let path: String = w.split('"').step_by(2).collect();
-            !w.starts_with('-') && !path.contains(".value")
-                && ["keys", "length", "paths", ".metadata", ".kind", "type", ".key", "label"].iter().any(|k| path.contains(k))
+        "jq" | "yq" => cmd[1..].iter().filter(|w| !w.starts_with('-')).any(|w| {
+            let path = w.split('"').step_by(2).collect::<String>().to_lowercase();
+            let counted = |rest: &str| rest.trim_start().strip_prefix('|').is_some_and(|r| ["keys", "length"].iter().any(|k| r.trim_start().starts_with(k)));
+            let values = [".data", ".stringdata", ".value", "secretstring", "secretbinary"]
+                .iter()
+                .any(|k| path.match_indices(k).any(|(i, _)| !counted(&path[i + k.len()..])));
+            !values && ["keys", "length", "paths", ".metadata", ".kind", "type", ".key", "label", ".name", ".arn"].iter().any(|k| path.contains(k))
         }),
         _ => false,
     }
+}
+
+/// Index of the first word from `i` that is not a flag or the value of one in `takes_value`.
+fn after_flags<S: AsRef<str>>(words: &[S], mut i: usize, takes_value: &[&str]) -> usize {
+    while let Some(flag) = words.get(i).map(AsRef::as_ref).filter(|f| f.starts_with('-')) {
+        i += if takes_value.contains(&flag) { 2 } else { 1 };
+    }
+    i
+}
+
+/// The value of `--flag value` or `--flag=value`.
+fn flag_value<'a>(w: &[&'a str], flag: &str) -> Option<&'a str> {
+    w.iter().enumerate().find_map(|(i, x)| if *x == flag { w.get(i + 1).copied() } else { x.strip_prefix(flag)?.strip_prefix('=') })
 }
 
 /// `flag` with `value`, attached (`-f1`) or separate (`-f 1`).
@@ -129,9 +147,17 @@ fn base(cmd: &str) -> &str {
 
 /// Commands whose output is secret values.
 fn dump(cmd: &[String]) -> Option<String> {
-    let w: Vec<&str> = cmd.iter().map(String::as_str).collect();
-    let c = base(w.first()?);
-    let has = |x: &str| w.contains(&x);
+    const GLOBAL_VALUE_FLAGS: &[&str] = &[
+        "--profile", "--region", "--endpoint-url", "--project", "--account", "--configuration", "--context",
+        "--kubeconfig", "--config", "-n", "--namespace", "-namespace", "-address", "-o", "--output",
+    ];
+    let c = base(cmd.first()?);
+    if cmd.iter().any(|x| matches!(x.as_str(), "--help" | "-h" | "help")) {
+        return None;
+    }
+    let w: Vec<&str> = cmd[..1].iter().chain(&cmd[after_flags(cmd, 1, GLOBAL_VALUE_FLAGS).min(cmd.len())..]).map(String::as_str).collect();
+    let all: Vec<&str> = cmd.iter().map(String::as_str).collect();
+    let has = |x: &str| all.contains(&x);
     let label = |s: &str| Some(s.to_string());
     match c {
         "kubectl" | "oc" => {
@@ -159,25 +185,42 @@ fn dump(cmd: &[String]) -> Option<String> {
             values.then(|| format!("{c} get secret -o {}", output.split(['=', '{']).next().unwrap_or(output)))
         }
         "op" => match w.get(1..3) {
-            Some(["read", _]) => label("op read"),
+            Some(["read", _]) if !has("-o") && !has("--out-file") => label("op read"),
             Some(["item", "get"]) if has("--reveal") => label("op item get --reveal"),
             Some(["inject", _]) if !w.iter().any(|x| x.starts_with("-o") || x.starts_with("--out-file")) => label("op inject"),
             _ => None,
         },
         "gh" if w.get(1..3) == Some(&["auth", "token"]) => label("gh auth token"),
         "glab" if w.get(1..3) == Some(&["auth", "status"]) && (has("-t") || has("--show-token")) => label("glab auth status -t"),
+        "glab" if matches!(w.get(1..3), Some(["variable", "get" | "export"])) => label("glab variable get"),
         "printenv" if w.len() == 1 || w[1..].iter().any(|v| crate::rules::names_secret(v)) => label("printenv"),
         "env" if w.len() == 1 => label("env"),
         "echo" | "printf" => w[1..].iter().flat_map(|a| variables(a)).find(|v| crate::rules::names_secret(v)).map(|v| format!("{c} ${v}")),
-        "vault" if matches!(w.get(1..3), Some(["kv", "get"])) || w.get(1) == Some(&"read") => label("vault read"),
-        "aws" if w.get(1..3) == Some(&["secretsmanager", "get-secret-value"])
-            || w.get(1) == Some(&"ssm") && has("--with-decryption") =>
-        {
-            label("aws secret read")
+        "vault" if (matches!(w.get(1..3), Some(["kv", "get"])) || w.get(1) == Some(&"read")) && !w.iter().any(|x| x.starts_with("sys/")) => {
+            label("vault read")
+        }
+        "aws" => {
+            let read = w.get(1..3) == Some(&["secretsmanager", "get-secret-value"]) || w.get(1) == Some(&"ssm") && has("--with-decryption");
+            let names_only = flag_value(&all, "--query").is_some_and(|q| !q.to_lowercase().contains("secret") && !q.to_lowercase().contains("value"));
+            let config = w.get(1..3) == Some(&["configure", "get"]) && w.get(3).is_some_and(|k| crate::rules::names_secret(k));
+            (read && !names_only || config).then(|| "aws secret read".to_string())
         }
         "gcloud" if w.get(1..4) == Some(&["secrets", "versions", "access"]) => label("gcloud secrets versions access"),
         "az" if w.get(1..4) == Some(&["keyvault", "secret", "show"]) => label("az keyvault secret show"),
-        "sops" if (has("-d") || has("--decrypt")) && !has("-i") && !has("--in-place") => label("sops -d"),
+        "sops" if (has("-d") || has("--decrypt") || w.get(1) == Some(&"decrypt"))
+            && !has("-i") && !has("--in-place") && flag_value(&all, "--output").is_none() =>
+        {
+            label("sops -d")
+        }
+        "terraform" | "tofu" if w.get(1) == Some(&"output") && (has("-raw") || has("-json")) => label("terraform output -raw"),
+        "doppler" if w.get(1) == Some(&"secrets") && match w.get(2) {
+            None => true,
+            Some(&"get") => has("--plain"),
+            Some(&"download") => has("--no-file"),
+            _ => false,
+        } => label("doppler secrets"),
+        "pass" if w.get(1) == Some(&"show") => label("pass show"),
+        "bw" if matches!(w.get(1..3), Some(["get", "password" | "item"])) => label("bw get"),
         "git" if w.get(1..3) == Some(&["credential", "fill"]) => label("git credential fill"),
         "security" if w.get(1).is_some_and(|s| s.starts_with("find-") && s.ends_with("-password")) && (has("-w") || has("-g")) => {
             label("security find-password")
@@ -186,16 +229,19 @@ fn dump(cmd: &[String]) -> Option<String> {
     }
 }
 
-/// Names in `$NAME` and `${NAME}` that the shell expands, outside `$(...)`; `$PWD` is a directory.
+/// Names in `$NAME` and `${NAME}` that the shell expands, outside `$(...)`; `$PWD` is a directory and
+/// `${NAME:+set}` only says whether it is set.
 fn variables(arg: &str) -> Vec<&str> {
     let outside = arg.split_once("$(").map_or(arg, |(before, _)| before);
     outside
         .split('$')
         .skip(1)
-        .map(|rest| {
-            let rest = rest.strip_prefix('{').unwrap_or(rest);
+        .filter_map(|rest| {
+            let braced = rest.strip_prefix('{');
+            let rest = braced.unwrap_or(rest);
             let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
-            &rest[..end]
+            let presence = braced.is_some() && rest[end..].starts_with([':', '+']) && rest[end..].trim_start_matches(':').starts_with('+');
+            (!presence).then_some(&rest[..end])
         })
         .filter(|v| !v.is_empty() && !matches!(*v, "PWD" | "OLDPWD"))
         .collect()
@@ -212,18 +258,34 @@ fn echoed_substitution(cmd: &[String]) -> Option<String> {
     })
 }
 
-/// `(cmd)`, `bash -c 'cmd'`, `eval cmd`: a command run inside this one.
+/// `(cmd)`, `bash -c 'cmd'`, `eval cmd`, `ssh host cmd`, `kubectl exec pod -- cmd`, `docker exec ctr cmd`: a
+/// command run inside this one, whose output comes back here.
 fn nested(cmd: &[String]) -> Option<String> {
     let first = cmd.first()?;
     if let Some(inner) = first.strip_prefix('(') {
         return raw_secret_output(&unword(inner.strip_suffix(')').unwrap_or(inner)));
     }
     match base(first) {
-        "sh" | "bash" | "zsh" | "dash" => {
+        "sh" | "bash" | "zsh" | "dash" | "su" | "script" => {
             let c = cmd.iter().position(|w| w.starts_with('-') && !w.starts_with("--") && w.ends_with('c'))?;
             raw_secret_output(&unword(cmd.get(c + 1)?))
         }
         "eval" => raw_secret_output(&unword(&cmd[1..].join(" "))),
+        "ssh" => {
+            const TAKES_VALUE: &[&str] = &["-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-E", "-S", "-b", "-c", "-m"];
+            let host = after_flags(cmd, 1, TAKES_VALUE);
+            raw_secret_output(&unword(&cmd.get(host + 1..)?.join(" ")))
+        }
+        "kubectl" | "oc" if cmd.iter().any(|w| w == "exec") => {
+            let dashes = cmd.iter().position(|w| w == "--")?;
+            raw_secret_output(&unword(&cmd[dashes + 1..].join(" ")))
+        }
+        "docker" | "podman" => {
+            const TAKES_VALUE: &[&str] = &["-e", "--env", "-u", "--user", "-w", "--workdir", "--env-file"];
+            let exec = cmd.iter().position(|w| w == "exec")?;
+            let target = after_flags(cmd, exec + 1, TAKES_VALUE);
+            raw_secret_output(&unword(&cmd.get(target + 1..)?.join(" ")))
+        }
         _ => None,
     }
 }
@@ -252,7 +314,7 @@ fn strip_heredocs(command: &str) -> String {
             }
             continue;
         }
-        if let Some((terminator, expands, _)) = heredoc(line) {
+        if let Some((terminator, expands, _, _)) = heredoc(line) {
             open = Some((terminator, expands, line));
             continue;
         }
@@ -265,8 +327,8 @@ fn strip_heredocs(command: &str) -> String {
     out
 }
 
-/// The heredoc a line opens: terminator, whether the body expands, and the rest of the line after it.
-fn heredoc(line: &str) -> Option<(String, bool, &str)> {
+/// The heredoc a line opens: terminator, whether the body expands, and the line before and after it.
+fn heredoc(line: &str) -> Option<(String, bool, &str, &str)> {
     let at = line.match_indices("<<").map(|(i, _)| i).find(|&i| {
         let before = &line[..i];
         before.matches('\'').count() % 2 == 0 && before.matches('"').count() % 2 == 0
@@ -280,16 +342,19 @@ fn heredoc(line: &str) -> Option<(String, bool, &str)> {
     let rest = rest.trim_start_matches(['\'', '"']);
     let len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
     let after = rest[len..].trim_start_matches(['\'', '"']);
-    (len > 0).then(|| (rest[..len].to_string(), !quoted, after))
+    (len > 0).then(|| (rest[..len].to_string(), !quoted, &line[..at], after))
 }
 
 fn expanded(opener: &str, secrets: &[String]) -> String {
-    let Some((_, _, after)) = heredoc(opener) else { return opener.to_string() };
-    if secrets.is_empty() || opener.split_whitespace().next() != Some("cat") {
+    let Some((_, _, before, after)) = heredoc(opener) else { return opener.to_string() };
+    let Some(args) = before.trim_start().strip_prefix("cat").filter(|a| a.is_empty() || a.starts_with(' ')) else {
+        return opener.to_string();
+    };
+    if secrets.is_empty() {
         return opener.to_string();
     }
     let vars: Vec<String> = secrets.iter().map(|v| format!("${{{v}}}")).collect();
-    format!("echo {}{after}", vars.join(" "))
+    format!("echo {}{args} {after}", vars.join(" "))
 }
 
 /// Split on separators outside quotes, `$(...)`, `(...)` and backticks.

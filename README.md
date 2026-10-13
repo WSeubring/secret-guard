@@ -107,7 +107,7 @@ Measured on this machine:
 | Helm `checksum/secret: <sha256>` | false positive | clean |
 | Password forms (DB URL, `DB_PASSWORD=`, prose, `mysql -p`, `curl -u`, YAML) | 0 / 6 detected | 6 / 6 |
 | Reads hook JSON | needs a wrapper | native |
-| [CredData](#public-benchmark-creddata) precision / recall | 0.856 / 0.450 | 0.898 / 0.304 |
+| [CredData](#public-benchmark-creddata) precision / recall | 0.856 / 0.450 | 0.897 / 0.304 |
 
 ## Detection
 
@@ -194,8 +194,8 @@ Results on the labelled set (3 seeds):
 
 | Set | Size | Result |
 |---|---|---|
-| Secret cases | 7,914 | recall 99.79 % |
-| Clean cases | 11,340 | 0 false positives |
+| Secret cases | 12,000 | recall 99.65 % |
+| Clean cases | 15,567 | 0 false positives |
 
 The remaining misses are random passwords that look like a placeholder, reference or
 code (a placeholder word such as `baz`, a leading `!`, an embedded `==`).
@@ -213,7 +213,7 @@ sample in seconds.
 
 | Scanner | Precision | Recall | F1 | Hits on unlabelled lines |
 |---|---|---|---|---|
-| secret-guard | **0.898** | 0.304 | 0.454 | 126 |
+| secret-guard | **0.897** | 0.304 | 0.454 | 126 |
 | gitleaks 8 | 0.856 | **0.450** | **0.590** | 488 |
 
 Recall is lower by design. Most remaining misses are values that are not worth blocking

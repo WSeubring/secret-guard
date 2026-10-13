@@ -70,3 +70,31 @@ fn redact_mode_masks_pgp_private_key_blocks() {
     let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
     assert!(lines.iter().all(|l| !out.contains(l.as_str())), "{out}");
 }
+
+#[test]
+fn tokens_embedded_in_words_are_not_findings() {
+    let token = format!("ghp_{}", random(36, 7, ALNUM));
+    assert!(scan_text(&format!("x{token}")).is_empty());
+    assert!(scan_text(&format!("prefix_{token}y")).is_empty());
+    assert_eq!(scan_text(&format!("({token})")).len(), 1);
+}
+
+#[test]
+fn secrets_inside_base64_are_found_and_masked_whole() {
+    let token = format!("ghp_{}", random(36, 9, ALNUM));
+    let b64 = |s: &str| {
+        let t = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        s.as_bytes()
+            .chunks(3)
+            .flat_map(|c| {
+                let n = c.iter().enumerate().fold(0u32, |a, (i, &b)| a | (b as u32) << (16 - 8 * i));
+                (0..4).map(move |i| if i <= c.len() { t[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' })
+            })
+            .collect::<String>()
+    };
+    let text = format!("data:\n  token: {}\n  other: plain\n", b64(&format!("GITHUB_TOKEN={token}")));
+    let found = scan_text(&text);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let out = mask(&text, &found);
+    assert!(out.contains("token: [secret-guard: github-token redacted]\n  other: plain"), "{out}");
+}

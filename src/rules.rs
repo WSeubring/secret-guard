@@ -11,7 +11,7 @@ use std::sync::{LazyLock, OnceLock};
 
 const KEY_EXCLUDE_WORDS: &[&str] = &[
     "hash", "digest", "checksum", "sha", "sha1", "sha256", "sha512", "fingerprint", "page",
-    "cursor", "next", "continuation", "csrf", "xsrf", "nonce", "length", "len", "expiry",
+    "cursor", "next", "continuation", "sync", "csrf", "xsrf", "nonce", "length", "len", "expiry",
     "expires", "expiration", "ttl", "type", "count", "limit", "max", "min", "public",
     "publishable", "file", "path", "name", "ref", "env", "var", "url", "header", "prefix",
     "regex", "pattern", "field", "label", "placeholder", "example", "sample", "dummy",

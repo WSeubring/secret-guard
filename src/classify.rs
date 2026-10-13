@@ -403,6 +403,21 @@ fn random_shape(v: &str, low: &str, n: usize) -> bool {
     false
 }
 
+/// A long random key body holds words like `todo` by chance, and a fake one cannot be long without repeating:
+/// past 200 chars only runs, sequences and low diversity mark a placeholder.
+pub(crate) fn fake_key_body(body: &str) -> Result<(), Reason> {
+    if body.len() <= 200 {
+        return fake_token(body, body);
+    }
+    if KNOWN_EXAMPLES.contains(&body) {
+        return Err(Reason::KnownExample);
+    }
+    if has_run(body, 8) || has_sequence(body, 8) || low_diversity(body) {
+        return Err(Reason::Placeholder);
+    }
+    Ok(())
+}
+
 pub(crate) fn fake_token(token: &str, part: &str) -> Result<(), Reason> {
     if KNOWN_EXAMPLES.contains(&token) {
         return Err(Reason::KnownExample);

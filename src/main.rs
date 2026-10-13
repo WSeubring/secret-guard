@@ -144,7 +144,7 @@ fn redact_stream() -> ExitCode {
             }
             continue;
         }
-        if text.contains("PRIVATE KEY-----") && text.contains("-----BEGIN") && !text.contains("-----END") {
+        if text.contains("-----BEGIN") && text.contains("PRIVATE KEY") && !text.contains("-----END") {
             in_key = true;
             let _ = writeln!(out, "{text}\n[secret-guard: private key redacted]");
             continue;

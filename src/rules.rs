@@ -1,6 +1,6 @@
 //! The rule table: each rule is a prefiltered regex plus a check that confirms the match.
 
-use crate::classify::{b64decode_loose, consonant_run, entropy, fake_token, percent_decode, printable, secret_value, Context, Reason};
+use crate::classify::{b64decode_loose, consonant_run, entropy, fake_key_body, fake_token, percent_decode, printable, secret_value, Context, Reason};
 use crate::{ascii_regex, bytes_regex};
 use regex_automata::dfa::{dense::DFA, Automaton};
 use regex_automata::Input;
@@ -373,7 +373,7 @@ fn key_material(body: &str) -> Result<(), Reason> {
     if body.len() < 64 {
         return Err(Reason::NoKeyMaterial);
     }
-    fake_token(body, body)
+    fake_key_body(body)
 }
 
 impl Check {
@@ -484,13 +484,12 @@ fn in_local_url(text: &str, start: usize) -> bool {
     static LOCAL: LazyLock<Regex> = LazyLock::new(|| {
         ascii_regex(r"^[a-z][a-z0-9+.-]*://(?:[A-Za-z0-9._~%!$&*+,;:=@-]*@)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/?#]|$)")
     });
-    let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | '<' | '>' | '=');
-    let Some(scheme) = text[..start].rfind("://") else { return false };
-    let from = text[..scheme].char_indices().rev().find(|&(_, c)| delim(c)).map_or(0, |(i, c)| i + c.len_utf8());
-    if text[from..start].contains(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`')) {
-        return false;
-    }
-    let end = text[start..].find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`')).map_or(text.len(), |i| start + i);
+    let quote = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`');
+    let delim = |c: char| quote(c) || matches!(c, '(' | '<' | '>' | '=');
+    let token = text[..start].char_indices().rev().find(|&(_, c)| quote(c)).map_or(0, |(i, c)| i + c.len_utf8());
+    let Some(scheme) = text[token..start].rfind("://").map(|i| token + i) else { return false };
+    let from = text[token..scheme].char_indices().rev().find(|&(_, c)| delim(c)).map_or(token, |(i, c)| token + i + c.len_utf8());
+    let end = text[start..].find(quote).map_or(text.len(), |i| start + i);
     LOCAL.is_match(&text[from..end])
 }
 

@@ -43,3 +43,30 @@ fn whole_private_key_body_is_masked() {
         assert!(out.contains("-----END RSA PRIVATE KEY-----") && out.ends_with("after"), "{out}");
     }
 }
+
+#[test]
+fn long_random_key_bodies_are_never_taken_for_placeholders() {
+    for seed in 0..300 {
+        let body = random(3200, 1000 + seed, B64);
+        let lines: Vec<&str> = (0..body.len()).step_by(64).map(|i| &body[i..i + 64]).collect();
+        let key = format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n", lines.join("\n"));
+        assert!(!scan_text(&key).is_empty(), "missed key {seed}");
+    }
+}
+
+#[test]
+fn redact_mode_masks_pgp_private_key_blocks() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let lines: Vec<String> = (0..8).map(|i| random(64, 300 + i, B64)).collect();
+    let block = format!("-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n{}\n-----END PGP PRIVATE KEY BLOCK-----\n", lines.join("\n"));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_secret-guard"))
+        .arg("redact")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(block.as_bytes()).unwrap();
+    let out = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    assert!(lines.iter().all(|l| !out.contains(l.as_str())), "{out}");
+}

@@ -67,10 +67,27 @@ value can be taken out; the replacement text is scanned as usual.
 allowed with a note to the model (`additionalContext`) to keep secret values out of tool
 calls and output. Only a found secret blocks.
 
-**Not covered: a tool prints a secret.** Hooks run before a tool or after it; output such
-as `cat .env`, `kubectl get secret -o yaml` or `printenv` is already in the conversation
-by the time any hook sees it. Only commands that put the value in their own input are
-blocked.
+**A command would print secret values** (`cat .env`, `kubectl get secret -o yaml`,
+`op read …`, `gh auth token`, `env | grep TOKEN`, `echo $DB_PASSWORD`). Tool output lands
+in the conversation, so the call is blocked before it runs:
+
+```
+secret-guard: blocked Bash call, `kubectl get secret -o yaml` would print secret values
+into the conversation, and anything printed there has to be rotated. Keep the values out
+of the output: pipe them into the command that needs them, use them inside $(...),
+redirect to a file, or print names only (`jq 'keys'`, `cut -d= -f1`, `grep -c`). ...
+```
+
+Handling values without printing them is allowed: piping into a consumer
+(`| kubeseal`, `| docker login --password-stdin`, `| sha256sum`, any unknown command),
+`$(...)`, `> file`, names or counts only (`jq '.data | keys'`, `cut -d= -f1`,
+`awk -F= '{print $1}'`, `grep -c`), masking (`sed 's/=.*/=<set>/'`), and `sed -i`. File
+readers are judged on what they would actually print: `grep APP_ENV .env` or
+`head -n 1 .env` passes when the matched lines hold no secret.
+
+**Not covered: output of commands that are not known to print secrets** (a script, app
+logs, an MCP reply, a fetched page). Hooks run before a tool or after it, so that output
+is already in the conversation by the time any hook could see it.
 
 ## Why not gitleaks
 

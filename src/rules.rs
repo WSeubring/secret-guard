@@ -72,6 +72,11 @@ fn key_names_secret(words: &[String]) -> bool {
     last == "base" && n >= 3 && words[n - 2] == "key" && words[n - 3] == "secret"
 }
 
+/// Does a variable or key name, like `GITHUB_TOKEN`, name a credential?
+pub(crate) fn names_secret(name: &str) -> bool {
+    !key_excluded(name)
+}
+
 /// `1Password: <item id>` names the password manager, not a password.
 fn key_excluded(key: &str) -> bool {
     let words = key_words(key);

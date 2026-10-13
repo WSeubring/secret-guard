@@ -1,6 +1,7 @@
 //! What the hook does with a Claude Code event: allow it, or block it with a message.
 
-use crate::{referenced_files, scan_event, scan_text, Finding};
+use crate::shell::SecretFile;
+use crate::{raw_secret_output, referenced_files, scan_event, scan_text, Finding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use regex::Regex;
@@ -70,8 +71,38 @@ pub const UNSCANNED: &str = "secret-guard could not scan this call (internal err
     secret manager).";
 
 /// A scanner panic steers instead of blocking: only a found secret is worth stopping work for.
+/// `cat .env`, `kubectl get secret -o yaml`: a Bash command whose output would carry secret values.
+fn bash_exposure(event: &Value) -> Option<String> {
+    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+        return None;
+    }
+    let command = event.get("tool_input")?.get("command")?.as_str()?;
+    let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or(""));
+    raw_secret_output(command, cwd, &|p| {
+        let text = read_text(p)?;
+        let found = scan_text(&text);
+        if found.is_empty() {
+            return None;
+        }
+        let lines = found.iter().map(|f| text[..f.start].matches('\n').count() + 1).collect();
+        let secrets = found.into_iter().map(|f| f.secret).collect();
+        Some(SecretFile { text, lines, secrets })
+    })
+}
+
 pub fn decide(event: &Value, policy: impl FnOnce() -> Policy) -> Decision {
-    let Ok(findings) = std::panic::catch_unwind(|| scan_all(event)) else { return Decision::Steer(UNSCANNED.into()) };
+    let Ok((findings, exposure)) = std::panic::catch_unwind(|| (scan_all(event), bash_exposure(event))) else {
+        return Decision::Steer(UNSCANNED.into());
+    };
+    if let Some(what) = exposure {
+        return Decision::Block(format!(
+            "secret-guard: blocked Bash call, `{what}` would print secret values into the conversation, \
+             and anything printed there has to be rotated. Keep the values out of the output: pipe them into the \
+             command that needs them, use them inside $(...), redirect to a file, or print names only \
+             (`jq 'keys'`, `cut -d= -f1`, `grep -c`). If the user needs to see a value, ask them to look it up \
+             outside this session."
+        ));
+    }
     if findings.is_empty() {
         return Decision::Allow;
     }

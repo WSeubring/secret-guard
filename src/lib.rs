@@ -7,7 +7,9 @@
 mod classify;
 mod patterns;
 pub mod decision;
+pub use shell::raw_secret_output;
 mod rules;
+pub mod shell;
 
 pub use classify::{classify, Context, Reason, Verdict};
 use rules::RULES;

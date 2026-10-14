@@ -124,6 +124,13 @@ fn dumped_secrets_are_blocked() {
         "bw list items",
         "bw get notes x",
         "\\gh auth token",
+        "echo `gh auth token`",
+        "echo \"token: `gh auth token`\"",
+        "kubectl run tmp -it --rm --image=busybox -- printenv DB_PASSWORD",
+        "kubectl run tmp --attach --image=busybox --restart=Never -- printenv DB_PASSWORD",
+        "case $x in a) gh auth token;; esac",
+        "case $x in a) ls;; b|c) gh auth token;; esac",
+        "case \"$1\" in\n  prod)\n    gh auth token\n    ;;\nesac",
     ] {
         assert!(check(command).is_some(), "not blocked: {command}");
     }
@@ -242,6 +249,13 @@ fn file_reads_and_safe_handling_are_allowed() {
         "doppler secrets download",
         "security add-generic-password -s x -a me -w",
         "kubectl run tmp --image=busybox --restart=Never -- printenv DB_PASSWORD",
+        "echo '`gh auth token`'",
+        "kubeseal `gh auth token`",
+        "echo `date`",
+        "kubectl run tmp -it --rm --image=busybox -- ls",
+        "case $x in a) gh auth token | wc -c;; esac",
+        "case $x in case $y in a) ls;; esac;; esac",
+        "echo in case",
         "cat > 'notes file.md' <<'EOF'\ngh auth token\nEOF",
     ] {
         assert_eq!(check(command), None, "blocked: {command}");

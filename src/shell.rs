@@ -52,12 +52,17 @@ fn pipeline(stages: &[Vec<String>]) -> Option<String> {
     None
 }
 
-/// The stage's command and arguments, without `VAR=x`, `sudo -E`, `do` and the like. Bare `env` is a command.
+/// The stage's command and arguments, without `VAR=x`, `sudo -E`, `do`, `case x in a)` and the like. Bare `env`
+/// is a command.
 fn command_words(stage: &[String]) -> &[String] {
     let mut i = 0;
     while let Some(w) = stage.get(i) {
-        if is_assignment(w) {
+        if is_assignment(w) || w.ends_with(')') && !w.contains('(') {
             i += 1;
+            continue;
+        }
+        if w == "case" {
+            i = stage[i..].iter().position(|x| x == "in").map_or(stage.len(), |p| i + p + 1);
             continue;
         }
         let Some((_, takes_value)) = PREFIXES.iter().find(|(p, _)| p == w) else { break };
@@ -250,14 +255,17 @@ fn variables(arg: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `echo "$(op read …)"`: a substitution whose output is printed.
+/// `echo "$(op read …)"` or ``echo `op read …` ``: a substitution whose output is printed.
 fn echoed_substitution(cmd: &[String]) -> Option<String> {
     if !matches!(base(cmd.first()?), "echo" | "printf") {
         return None;
     }
     cmd[1..].iter().find_map(|a| {
-        let inner = a.split_once("$(")?.1;
-        raw_secret_output(&unword(inner.rsplit_once(')').map_or(inner, |(body, _)| body)))
+        let (inner, close) = match a.split_once("$(") {
+            Some((_, inner)) => (inner, ')'),
+            None => (a.split_once('`')?.1, '`'),
+        };
+        raw_secret_output(&unword(inner.rsplit_once(close).map_or(inner, |(body, _)| body)))
     })
 }
 
@@ -279,7 +287,7 @@ fn nested(cmd: &[String]) -> Option<String> {
             let host = after_flags(cmd, 1, TAKES_VALUE);
             raw_secret_output(&unword(&cmd.get(host + 1..)?.join(" ")))
         }
-        "kubectl" | "oc" if cmd.iter().any(|w| w == "exec") => {
+        "kubectl" | "oc" if cmd.iter().any(|w| w == "exec") || cmd.iter().any(|w| w == "run") && cmd.iter().any(|w| attached(w)) => {
             let dashes = cmd.iter().position(|w| w == "--")?;
             raw_secret_output(&unword(&cmd[dashes + 1..].join(" ")))
         }
@@ -295,7 +303,12 @@ fn nested(cmd: &[String]) -> Option<String> {
 
 /// A word back as shell text, for commands that run it again: quoted `$` and `>` are live there.
 fn unword(w: &str) -> String {
-    w.replace('\u{1}', "$").replace('\u{2}', ">")
+    w.replace('\u{1}', "$").replace('\u{2}', ">").replace('\u{3}', "`")
+}
+
+/// `kubectl run` flags that bring the pod's output back to this terminal.
+fn attached(flag: &str) -> bool {
+    matches!(flag, "-i" | "-it" | "-ti" | "--stdin" | "--stdin=true" | "--attach" | "--attach=true" | "--tty" | "-t")
 }
 
 /// Heredoc bodies are data, not commands. An unquoted terminator expands `$VARS` in the body, so
@@ -403,12 +416,12 @@ fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
     parts.into_iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
 }
 
-/// Shell words with quotes removed; `$(...)` stays inside its word. Quoted `$` becomes `\u{1}` and quoted `>`
-/// becomes `\u{2}`: neither is live.
+/// Shell words with quotes removed; `$(...)` and `` `...` `` stay inside their word. Quoted `$` becomes `\u{1}`, quoted `>`
+/// `\u{2}` and single-quoted `` ` `` `\u{3}`: none is live.
 fn words(stage: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    let (mut single, mut double, mut depth) = (false, false, 0u32);
+    let (mut single, mut double, mut tick, mut depth) = (false, false, false, 0u32);
     let mut started = false;
     let mut escaped = false;
     for c in stage.chars() {
@@ -420,6 +433,11 @@ fn words(stage: &str) -> Vec<String> {
         match c {
             '\\' if !single => escaped = true,
             '$' if single => cur.push('\u{1}'),
+            '`' if single => cur.push('\u{3}'),
+            '`' => {
+                tick = !tick;
+                cur.push(c);
+            }
             '>' if single || double => cur.push('\u{2}'),
             '\'' if !double && depth == 0 => {
                 single = !single;
@@ -437,7 +455,7 @@ fn words(stage: &str) -> Vec<String> {
                 depth -= 1;
                 cur.push(c);
             }
-            c if c.is_whitespace() && !single && !double && depth == 0 => {
+            c if c.is_whitespace() && !single && !double && !tick && depth == 0 => {
                 if started || !cur.is_empty() {
                     out.push(std::mem::take(&mut cur));
                 }

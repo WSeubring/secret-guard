@@ -212,3 +212,16 @@ fn explain_event_names_rejected_candidates() {
     let rejected = secret_guard::explain_event(&ev);
     assert!(rejected.iter().any(|r| r.field == "command"), "{rejected:?}");
 }
+
+#[test]
+fn files_up_to_two_mib_are_scanned() {
+    let dir = temp_dir("size");
+    let head = format!("GITHUB_TOKEN={}\n", token());
+    for (name, len, blocked) in [("max.txt", 2 << 20, true), ("over.txt", (2 << 20) + 1, false)] {
+        let mut body = head.clone().into_bytes();
+        body.resize(len, b'\n');
+        std::fs::write(dir.join(name), body).unwrap();
+        let ev = json!({"hook_event_name": "PreToolUse", "tool_name": "Artifact", "tool_input": {"file_path": name}, "cwd": dir});
+        assert_eq!(matches!(decide(&ev, policy(&[])), Decision::Block(_)), blocked, "{name}");
+    }
+}

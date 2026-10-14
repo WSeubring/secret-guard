@@ -6,6 +6,9 @@
 //! unknown command), a names-only filter (`jq keys`, `cut -d= -f1`), a redirect to a file, or a `$(...)`
 //! keeps the values out.
 
+/// `pass` subcommands that print no secret; any other first word is an entry name, which `pass` shows.
+const PASS_SAFE: &[&str] = &["ls", "list", "find", "search", "insert", "add", "edit", "rm", "remove", "delete", "mv", "rename", "cp", "copy", "git", "init", "version", "help"];
+
 /// Commands that pass their input or file arguments through to their output.
 const PRINTERS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "bat", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut", "jq", "yq",
@@ -219,8 +222,8 @@ fn dump(cmd: &[String]) -> Option<String> {
             Some(&"download") => has("--no-file"),
             _ => false,
         } => label("doppler secrets"),
-        "pass" if w.get(1) == Some(&"show") => label("pass show"),
-        "bw" if matches!(w.get(1..3), Some(["get", "password" | "item"])) => label("bw get"),
+        "pass" if w.get(1).is_some_and(|s| !PASS_SAFE.contains(s)) && !has("-c") && !has("--clip") => label("pass show"),
+        "bw" if matches!(w.get(1..3), Some(["get", "password" | "item" | "notes" | "totp"] | ["list", "items"])) => label("bw get"),
         "git" if w.get(1..3) == Some(&["credential", "fill"]) => label("git credential fill"),
         "security" if w.get(1).is_some_and(|s| s.starts_with("find-") && s.ends_with("-password")) && (has("-w") || has("-g")) => {
             label("security find-password")
@@ -331,7 +334,7 @@ fn strip_heredocs(command: &str) -> String {
 fn heredoc(line: &str) -> Option<(String, bool, &str, &str)> {
     let at = line.match_indices("<<").map(|(i, _)| i).find(|&i| {
         let before = &line[..i];
-        before.matches('\'').count() % 2 == 0 && before.matches('"').count() % 2 == 0
+        before.matches('\'').count() % 2 == 0 && before.matches('"').count() % 2 == 0 && !before.contains("$((")
     })?;
     let rest = &line[at + 2..];
     if rest.starts_with('<') {
@@ -366,7 +369,6 @@ fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
     let b = s.as_bytes();
     while i < b.len() {
         let c = b[i] as char;
-        let quoted = single || double || tick || depth > 0;
         match c {
             '\\' if !single && i + 1 < b.len() => {
                 let end = s[i + 1..].chars().next().map_or(i + 1, |ch| i + 1 + ch.len_utf8());
@@ -381,7 +383,7 @@ fn split_top(s: &str, seps: &[&str]) -> Vec<String> {
             ')' if !single && depth > 0 => depth -= 1,
             _ => {}
         }
-        if !quoted && !single && !double {
+        if !single && !double && !tick && depth == 0 {
             if let Some(sep) = seps.iter().find(|sep| s[i..].starts_with(**sep)) {
                 let pipe_or = *sep == "|" && s[i..].starts_with("||");
                 let amp_and = *sep == "&"

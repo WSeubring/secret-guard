@@ -9,6 +9,8 @@ fn rejects_with_reason() {
         ("changeme123", Context::Quoted, Reason::Placeholder),
         ("Tulip#Kanaal", Context::Quoted, Reason::Wordy),
         ("acme/deploy!335", Context::Quoted, Reason::PathRef),
+        ("deploy#1234", Context::Quoted, Reason::PathRef),
+        ("!ImportValue", Context::Quoted, Reason::Reference),
         ("PostApiV1CredentialsBody", Context::Quoted, Reason::Identifier),
         ("DB_HOST_V2", Context::Quoted, Reason::ConstCase),
         ("v1.22.3-beta", Context::Quoted, Reason::Version),
@@ -24,7 +26,7 @@ fn rejects_with_reason() {
 
 #[test]
 fn accepts_random_values() {
-    for value in ["Xk29fLm2pQ7vR4", "q8!Zr2#Lm4?Tx9", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"] {
+    for value in ["Xk29fLm2pQ7vR4", "q8!Zr2#Lm4?Tx9", "Xk29fLm2pQ7vR4!9", "Xk29fLm2pQ7vR4#9", "!Xk29fLm2pQ7vR4", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"] {
         assert_eq!(classify(value, Context::Quoted), Verdict::Secret, "{value}");
     }
 }

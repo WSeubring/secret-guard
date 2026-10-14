@@ -28,7 +28,7 @@ const GENERIC_PLACEHOLDER_WORDS: &[&str] = &[
 ];
 
 const REFERENCE_PREFIXES: &[&str] = &[
-    "$", "@", "&", "*", "!", "env.", "env:", "process.env", "os.environ", "os.getenv",
+    "$", "@", "&", "*", "env.", "env:", "process.env", "os.environ", "os.getenv",
     "secrets.", "vars.", "inputs.", "env[", "enc[", "vault:", "op://", "ref+", "sm://",
     "arn:", "projects/", "file:", "keyring:", "valuefrom", "secretkeyref", "secretref",
     "sha256:", "sha512:", "sha1:", "sha384:", "md5:", "sha512-", "sha256-", "sha384-",
@@ -224,6 +224,9 @@ fn looks_identifier(v: &str) -> bool {
     IDENT.is_match(v) && WORD.find_iter(v).count() >= 3 && camel + seps >= 2
 }
 
+/// `!Ref DbSecret`, `!vault |`: a tag has no digits, a password starting with `!` usually does.
+static YAML_TAG: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"^!!?[A-Za-z][A-Za-z:./-]*(?:\s|$)"));
+
 /// Text rather than randomness: `Argo/Helm-rendered`, `Tulip#Kanaal`.
 fn looks_wordy(v: &str) -> bool {
     let words: Vec<&str> = v.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
@@ -232,7 +235,7 @@ fn looks_wordy(v: &str) -> bool {
 
 /// References, not values: `acme/deploy!335`, `acme/backend`, `app-staging/API_KEY`.
 fn looks_path_ref(v: &str) -> bool {
-    static MR_REF: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"^[\w./-]*[!#]\d+$"));
+    static MR_REF: LazyLock<Regex> = LazyLock::new(|| ascii_regex(r"^(?:[a-z0-9._-]*|[\w.-]*/[\w./-]*)[!#]\d+$"));
     if MR_REF.is_match(v) {
         return true;
     }
@@ -324,6 +327,7 @@ fn classify_at(v: &str, quoted: bool, min_len: usize, depth: u8) -> Result<(), R
     let low = v.to_lowercase();
     reject(KNOWN_EXAMPLES.contains(&v), Reason::KnownExample)?;
     reject(REFERENCE_PREFIXES.iter().any(|p| low.starts_with(p)), Reason::Reference)?;
+    reject(YAML_TAG.is_match(v), Reason::Reference)?;
     reject(HASH_PREFIXES.iter().any(|p| low.starts_with(p)), Reason::PasswordHash)?;
     reject(TEMPLATE_MARKERS.iter().any(|m| v.contains(m)), Reason::Template)?;
     reject(REGEX_MARKERS.iter().any(|m| v.contains(m)), Reason::Regex)?;

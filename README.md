@@ -194,11 +194,11 @@ Results on the labelled set (3 seeds):
 
 | Set | Size | Result |
 |---|---|---|
-| Secret cases | 12,000 | recall 99.65 % |
+| Secret cases | 12,000 | recall 99.69 % |
 | Clean cases | 15,567 | 0 false positives |
 
 The remaining misses are random passwords that look like a placeholder, reference or
-code (a placeholder word such as `baz`, a leading `!`, an embedded `==`).
+code (a placeholder word such as `baz`, an embedded `==`).
 
 The labelled set is written alongside the rules, so it measures regressions rather than
 real-world recall. For that, see the public benchmark below.
